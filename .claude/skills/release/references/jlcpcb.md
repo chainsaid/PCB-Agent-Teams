@@ -1,6 +1,6 @@
 ---
 name: jlcpcb
-description: JLCPCB PCB fabrication and assembly — BOM/CPL generation, basic vs extended parts, assembly constraints, design rules, ordering workflow. Use with KiCad for JLCPCB manufacturing. Use this reference from the `fab` skill when the user mentions JLCPCB, wants to order PCBs or assembled boards, needs prototype bare PCBs and stencils, wants to know JLCPCB design rules and capabilities, or is asking about PCB manufacturing costs or turnaround times. For Gerber/CPL export, stencil ordering, and production BOM management, stay in the `fab` skill.
+description: JLCPCB PCB fabrication and assembly — BOM/CPL generation, basic vs extended parts, assembly constraints, design rules, ordering workflow. Use with KiCad for JLCPCB manufacturing. Use this reference from the `release` skill when the user mentions JLCPCB, wants to order PCBs or assembled boards, needs prototype bare PCBs and stencils, wants to know JLCPCB design rules and capabilities, or is asking about PCB manufacturing costs or turnaround times. For Gerber/CPL export, stencil ordering, and production BOM management, stay in the `release` skill.
 ---
 
 # JLCPCB — PCB Fabrication & Assembly
@@ -64,7 +64,7 @@ The column header for LCSC numbers must be exactly **"LCSC Part #"** or **"LCSC 
    - `Footprint` -> `Footprint`
    - `LCSC` -> `LCSC Part #`
 
-For Gerber export settings, CPL format, and stencil ordering, stay in the `fab` skill.
+For Gerber export settings, CPL format, and stencil ordering, stay in the `release` skill.
 
 ## JLCPCB Official API (Approval Required)
 
@@ -148,16 +148,16 @@ To fix rotation issues:
 
 ### Prototype Order (Bare PCB + Stencil)
 
-1. **Export Gerbers** from KiCad (see `fab` skill for export settings)
+1. **Export Gerbers** from KiCad (see `release` skill for export settings)
 2. Upload gerbers to `https://cart.jlcpcb.com/quote` — configure layers, thickness, color, qty
 3. Add a **framed stencil** to the cart (uses paste layers from your gerbers)
 4. Order — PCBs and stencil typically arrive in ~1 week
 
 ### Production Order (Assembled Boards)
 
-1. **Export Gerbers** from KiCad (see `fab` skill for export settings)
+1. **Export Gerbers** from KiCad (see `release` skill for export settings)
 2. **Export BOM** as CSV with LCSC part numbers (format above)
-3. **Export CPL** (placement file) as CSV (see `fab` skill for format)
+3. **Export CPL** (placement file) as CSV (see `release` skill for format)
 4. Upload gerbers to `https://cart.jlcpcb.com/quote` — configure layers, thickness, color, qty
 5. Enable "PCB Assembly", select Economic or Standard
 6. Upload BOM and CPL files

@@ -1,6 +1,6 @@
 """release skill main orchestrator.
 
-Phase 8 entry point. Aggregates upstream artifacts into Projects/<name>/release/<ts>/
+Phase 5 entry point. Aggregates upstream artifacts into Projects/<name>/release/<ts>/
 + release_<ts>.zip + ORDER_GUIDE.md.
 
 Gate: requires bom-readiness sentinel valid (all_pass=true) and .kicad_pcb mtime
@@ -319,7 +319,7 @@ def _write_manifest(
 # ---------- main ----------
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Phase 8 release packager")
+    p = argparse.ArgumentParser(description="Phase 5 release packager")
     p.add_argument("project_dir", help="Path to Projects/<name>/")
     p.add_argument("--force", action="store_true", help="Overwrite existing release/<ts>/")
     p.add_argument("--skip-fab-export", action="store_true",

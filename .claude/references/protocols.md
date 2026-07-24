@@ -22,4 +22,4 @@
 
 ## Phase 编号约定
 
-工作区 Phase = 0–8 总流程；skill 内部 Phase / Stage 仅 skill 内有效。引用时写清楚是哪一种。
+工作区 Phase = 0–5 总流程（含 2.5 / 3.5 / 4.5 半阶，见根 CLAUDE.md 阶段表）；skill 内部 Phase / Stage 仅 skill 内有效。引用时写清楚是哪一种。

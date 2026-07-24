@@ -1,6 +1,6 @@
 ---
 name: pcbway
-description: PCBWay PCB fabrication and assembly — turnkey/consigned assembly, design rules, ordering workflow. Alternative to JLCPCB for manufacturing. Use with KiCad. Use this reference from the `fab` skill when the user mentions PCBWay, needs turnkey assembly (PCBWay sources parts by MPN), has parts not available on LCSC, needs assembled boards with non-LCSC components, wants to compare PCBWay vs JLCPCB, or needs assembly with parts sourced globally rather than from LCSC only. For Gerber/CPL export, stencil ordering, and production BOM management, stay in the `fab` skill.
+description: PCBWay PCB fabrication and assembly — turnkey/consigned assembly, design rules, ordering workflow. Alternative to JLCPCB for manufacturing. Use with KiCad. Use this reference from the `release` skill when the user mentions PCBWay, needs turnkey assembly (PCBWay sources parts by MPN), has parts not available on LCSC, needs assembled boards with non-LCSC components, wants to compare PCBWay vs JLCPCB, or needs assembly with parts sourced globally rather than from LCSC only. For Gerber/CPL export, stencil ordering, and production BOM management, stay in the `release` skill.
 ---
 
 # PCBWay — PCB Fabrication & Assembly
@@ -77,7 +77,7 @@ For turnkey, the **MPN** is the critical field — PCBWay uses it to source part
 2. Export via Edit Symbol Fields > Export CSV
 3. Reformat columns to match PCBWay's expected format (add Line#, Qty, Type columns)
 
-For Gerber export settings and CPL format, stay in the `fab` skill — both JLCPCB and PCBWay use the same formats.
+For Gerber export settings and CPL format, stay in the `release` skill — both JLCPCB and PCBWay use the same formats.
 
 ## PCB Design Rules (PCBWay Capabilities)
 
@@ -146,16 +146,16 @@ Documentation: `https://api-partner.pcbway.com/Help`
 
 ### Prototype Order (Bare PCB + Stencil)
 
-1. **Export Gerbers** from KiCad (see `fab` skill for export settings)
+1. **Export Gerbers** from KiCad (see `release` skill for export settings)
 2. Upload gerbers to `https://www.pcbway.com/orderonline.aspx` — configure layers, thickness, color, qty
 3. Order a **framed stencil** separately at `https://www.pcbway.com/stencil.aspx`
 4. Order — PCBs and stencil typically arrive in ~1 week
 
 ### Production Order (Assembled Boards)
 
-1. **Export Gerbers** from KiCad (see `fab` skill for export settings)
+1. **Export Gerbers** from KiCad (see `release` skill for export settings)
 2. **Export BOM** as CSV with MPN, Manufacturer, Description, Package, Type columns
-3. **Export CPL** (centroid/placement file) as CSV (see `fab` skill for format)
+3. **Export CPL** (centroid/placement file) as CSV (see `release` skill for format)
 4. Upload gerbers to PCBWay — configure PCB specs
 5. Select "PCB Assembly" — choose Turnkey, Partial Turnkey, or Consigned
 6. Upload BOM and centroid files

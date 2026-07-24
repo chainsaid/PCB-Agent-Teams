@@ -669,7 +669,7 @@ Document these when they affect the report — it helps the designer understand 
 - **Assembly notes**: Component placement order, reflow considerations, hand-solder items
 - **Specific assembler notes**: JLCPCB basic vs extended parts count, PCBWay turnkey vs consigned
 
-This section bridges the design review into the ordering workflow — the `fab` skill handles JLCPCB / PCBWay ordering specifics, but the report should flag anything the designer needs to address before ordering.
+This section bridges the design review into the ordering workflow — the `release` skill handles JLCPCB / PCBWay ordering specifics, but the report should flag anything the designer needs to address before ordering.
 
 ## Report Length Guidelines
 
