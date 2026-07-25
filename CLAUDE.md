@@ -12,6 +12,8 @@
 ```text
 PCB-Agent-Teams/
 ├── CLAUDE.md             ← 本文件
+├── README.md             ← 对外文档 **英文版**（source of truth）
+├── README.zh-CN.md       ← 对外文档 **中文版**（与 README.md 一一对应，必须同步）
 ├── USER.md               ← 在手硬件、所属地、能力、偏好（必读；不入 git，从 USER.md.example 复制）
 ├── lib_external/         ← 共享元件库（CONVENTIONS.md）
 ├── lib_cache/sources/    ← 外部库只读 cache（pre-filter 池，不被项目引用）
@@ -107,6 +109,7 @@ another agent。可用 skill = 下表 + 非 phase 的 `setup`（见上面 first-
 
 - ❌ 不要在工作区 CLAUDE.md 写**项目专属**或 **domain 铁律**——分别归项目 CLAUDE.md / SKILL.md
 - ❌ SKILL.md frontmatter 的 `description:` 不要裸写：值里含 `: `（如 `Triggers: 画 PCB`）会让严格 YAML 解析失败，Claude Code 不报错、静默退化成拿目录名当摘要 → **该 skill 自动触发失效**。一律用折叠块标量 `description: >-` 加两空格缩进
+- ❌ **`README.md` 与 `README.zh-CN.md` 禁止单边修改**——两份是同一文档的中英版本，改一份必须在**同一次 commit**里同步另一份（章节、表格行、链接、代码块一一对应）。只改一份 = 未完成。英文版是 source of truth：先改 `README.md`，再同步中文
 - ❌ 不要把 `.env` key 写进 git
 - ❌ 不要凭记忆猜 MPN / footprint / pin
 - ❌ 不要把 `draw-pcb` 当一键流水线——摆件 / 旋转 / 铺铜要靠电路判断（brief + render），每一步交付前都该人工 review；Phase E 自动布线也是可选项，用户随时可改用 KiCad GUI 手布

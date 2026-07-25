@@ -1,10 +1,59 @@
 # PCB-Agent-Teams — KiCad PCB Workflow
 
-> A multi-project PCB design workspace orchestrated around KiCad 10. Ten skills drive a Phase 0–5 pipeline that covers the full chain, from topology discussion to Gerber shipout.
+**English** · [中文](README.zh-CN.md)
+<!-- SYNC: this file and README.zh-CN.md are two language versions of one document — edit one, update the other in the same commit. -->
 
-> **Runtime — [Claude Code](https://claude.com/claude-code) only.** This workspace targets Claude Code and nothing else. It is driven by [`CLAUDE.md`](CLAUDE.md) (a routing table Claude Code auto-loads every session) plus a team of ten skills under `.claude/skills/`, which Claude Code discovers on its own. Both are Claude Code-native conventions, so it runs with zero config — and no other agent is set up here. The skills are plain `SKILL.md` files, so porting is possible; see [Using another agent](#using-another-agent) for exactly what has to change.
+[![License: PolyForm NC 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-informational)](LICENSE.md)
+![KiCad 10](https://img.shields.io/badge/KiCad-10-blue)
+![Python 3.12](https://img.shields.io/badge/Python-3.12-blue)
+![Runtime: Claude Code only](https://img.shields.io/badge/runtime-Claude%20Code%20only-orange)
+![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
+
+**Describe the board you want. Get back a KiCad project and a fab-ready Gerber package** — with every part
+checked against live distributor stock, and every stage cleared by scripts, SPICE and DRC rather than by the
+model's own say-so.
+
+Under the hood: a multi-project PCB workspace built on KiCad 10, where ten skills drive a Phase 0–5 pipeline
+covering the full chain from topology discussion to Gerber shipout.
+
+<!-- TODO(visual): drop a board photo or a generated 3D render here — this is the one thing the page still
+     lacks. Put the file in assets/ (tracked; docs/ is gitignored) and reference it as assets/<name>.png.
+     Only use a board this pipeline actually produced. -->
+
+### What a run looks like
+
+```text
+You:  I need an isolated 400 V DC-bus voltage sensor — 0–3.3 V out to an MCU ADC.
+
+/circuit-design        topology fixed: isolated amplifier + staged HV divider, anchor parts named
+/component-selecting-* 3 live candidates per part — all in stock, all with a ready KiCad library
+/component-preparing   datasheets fetched, symbols + footprints + 3D vendored, BOM locked
+/draw-schematic        .kicad_sch generated from Python source, ERC clean
+/check-schematic       divider ratio re-simulated in SPICE, every pin cross-checked vs datasheet
+/draw-pcb              HV/LV zones split, isolation barrier held, GND poured, DRC clean
+/check-pcb             44 EMC rules + thermal + parasitics + schematic↔PCB netlist diff
+/release               Gerber + CPL + production BOM + ORDER_GUIDE.md, zipped for the fab
+```
+
+You are never locked into that sequence — every step is a toolbox you can run, redo, hand-edit or skip.
+
+### Before you read on — two hard limits
+
+1. **macOS + KiCad 10.** The skills call `kicad-cli` and KiCad's bundled `pcbnew` Python API directly, so the
+   pipeline is macOS-only today.
+2. **Part selection ships for two locales — Japan and mainland China.** That is Phase 2 alone; *every other
+   phase is locale-neutral and runs anywhere*. Elsewhere you either adapt one of the two shipped selection
+   skills to your distributors (they are thin shells over a shared engine) or pick parts by hand and feed the
+   list to `component-preparing`. The pipeline never silently falls back to another region's skill. Details in
+   [First-time setup](#first-time-setup).
+
+> **Runtime — [Claude Code](https://claude.com/claude-code) only.** [`CLAUDE.md`](CLAUDE.md) (auto-loaded every
+> session) plus the skills under `.claude/skills/` are Claude Code-native conventions, so it runs with zero
+> config — and nothing else is wired up here. `SKILL.md` is an open format, so porting is possible; see
+> [Using another agent](#using-another-agent).
 >
-> **Just cloned this?** Open the folder in Claude Code and run `/setup`. It opens with one short question, then walks you through locale, toolchain and your profile in your own language. It stops firing once `USER.md` exists.
+> **Just cloned this?** Open the folder in Claude Code and run `/setup`. It opens with one short question, then
+> walks you through locale, toolchain and your profile in your own language. It stops firing once `USER.md` exists.
 
 ---
 
@@ -12,13 +61,15 @@
 
 ```text
 PCB-Agent-Teams/
-├── README.md             ← this file
+├── README.md             ← this file (English)
+├── README.zh-CN.md       ← Chinese version (keep in sync with README.md)
 ├── CLAUDE.md             ← routing table (auto-loaded by Claude Code every session)
 ├── LICENSE.md            ← PolyForm Noncommercial 1.0.0
 ├── THIRD_PARTY_NOTICES.md ← MIT notices for vendored/derived third-party code
 ├── USER.md.example       ← user-profile template (copy to USER.md)
 ├── USER.md               ← your profile: hardware on hand / locale / skills / preferences (gitignored)
 ├── requirements.txt      ← Python dependencies
+├── assets/               ← images used by the READMEs (tracked; `docs/` is local-only and gitignored)
 ├── .claude/
 │   ├── skills/           ← 10 skills + `setup` (first-run guide)
 │   └── references/       ← workspace meta-protocols (protocols.md)
@@ -50,25 +101,25 @@ Three gates built around "the things people trust least when an AI draws a PCB."
 
 ### 1. Zero-hallucination part selection
 
-Worried the AI invents part numbers? Not possible here.
+Every part number comes off a live distributor API. The model never gets to invent one.
 
 - **Distributor APIs are mandatory** — no MPN comes from memory. The JP locale queries DigiKey / Mouser / LCSC in **three parallel lanes**, so one component gets N candidates compared side by side; the CN locale runs a single key-free LCSC lane
 - **Hard filters**: stock active/nrnd + an existing component library available + spec match; anything with zero stock or no ready library is dropped
 - **Fast search**: a short list comes back in seconds based on hard metrics (footprint / tolerance / temperature grade / voltage grade, etc.)
-- **The whole BOM runs in one pass**; it only stops to ask the user when a spec has no solution on the market
+- **The whole BOM is worked in a single pass**; it only stops to ask when a spec has no answer on the market
 
-### 2. Assets must be ready before drawing — no shortcut allowed
+### 2. Nothing gets drawn until the assets are on disk
 
-Worried the AI skips steps and starts drawing? An entry gate blocks it.
+Worried the AI skips ahead and starts drawing? An entry gate stops it.
 
 - Before the candidate list is finalized, **datasheets are fetched up front** plus the component library (footprint symbol / 3D model / schematic symbol)
 - **Four-point fidelity check**: MPN vs the locked BOM / footprint class (through-hole vs SMD) vs the datasheet / generic-symbol masquerading as a real IC / pin count vs the part's actual pin count — one mismatch flips the gate to fail
 - **Part numbers are auto-injected** into schematic properties, avoiding manual-entry errors during drawing
-- **The drawing entrance is locked until assets are ready** — no skipping ahead
+- **The drawing entrance stays locked until the assets are ready** — there is no way around it
 
-### 3. Repeated multi-dimensional checks — every key quantity verified by two independent layers
+### 3. Everything is checked twice, two different ways
 
-Worried the AI passes on the surface but hides problems? Every key quantity is checked at least twice; failing any stage rolls back instead of bypassing.
+No number is trusted on a single reading. Every key quantity is verified by two independent layers, and failing any stage rolls the pipeline back — it never routes around.
 
 **Schematic stage** (`check-schematic`):
 
@@ -86,7 +137,7 @@ Worried the AI passes on the surface but hides problems? Every key quantity is c
 
 **Shipout stage** (`release`):
 
-- **Four-axis sourcing-preference gate**: channel / brand / price-vs-stock / blacklist must be on record before a release is built — the recommended order path in `ORDER_GUIDE.md` is driven entirely by them, so the builder fail-fasts instead of guessing
+- **Four-axis sourcing-preference gate**: channel / brand / price-vs-stock / blacklist must be on record before a release is built — the recommended order path in `ORDER_GUIDE.md` is driven entirely by them, so the builder stops and asks instead of guessing
 - **Procurement BOM vs production BOM kept on separate tracks**: the purchasing list and the assembly list are generated independently to avoid wrong orders or missing parts
 
 ---
@@ -167,7 +218,7 @@ Details in [`component-preparing/references/bom_lifecycle.md`](.claude/skills/co
 > check, `USER.md`, and keys only if your locale needs them. It is gated on `USER.md` being absent, so it
 > runs on a fresh clone and never again. The manual steps below are the same thing, by hand.
 
-> **⚠ Not in Japan?** Phase 2 (component selection) is the only locale-bound stage; every other phase is locale-neutral and runs unchanged. Set your locale in `USER.md §0`:
+> **Locale support.** As flagged up top, Phase 2 (component selection) is the only locale-bound stage — every other phase is locale-neutral and runs unchanged. Set yours in `USER.md §0`:
 > - **China mainland** — supported out of the box via `component-selecting-CN`: LCSC jlcsearch + jlcparts data shards, **no API keys at all** (lifecycle is honestly labeled `unverified` since LCSC carries no NRND data).
 > - **Japan** — the original `component-selecting-JP` (DigiKey JP + Mouser JP + LCSC; needs a free DigiKey key).
 > - **Anywhere else** — either **(a)** adapt one of the two shipped skills into a variant for your region (both are thin shells over a shared locale-driven engine — add a locale block to `locale_mapping.yaml` and mirror the CN skill's structure), or **(b)** pick parts by hand and feed the list to `component-preparing`. The pipeline deliberately never falls back to another locale's skill silently.
@@ -255,7 +306,7 @@ mkdir -p .agents && ln -s ../.claude/skills .agents/skills   # Codex; adjust pat
 Note `.gitignore` deliberately excludes `AGENTS.md` and `.agents/` to keep foreign scaffolding out of the
 upstream repo — drop those two lines in your fork or the symlinks will not be committed.
 
-**What to expect.** Skill *discovery* ports cleanly: with the symlink above, Codex lists all eleven skills.
+**What to expect.** Skill *discovery* ports cleanly: with the symlink above, Codex lists all eleven skills (the ten pipeline skills plus `setup`).
 Skill *execution* is a different question and is **untested** — the skills shell out to `kicad-cli`, the
 project venv and distributor REST APIs, and agents differ in how they sandbox commands and network access.
 Also note the pipeline itself is macOS-only (KiCad paths), and symlinks need Developer Mode on Windows.
