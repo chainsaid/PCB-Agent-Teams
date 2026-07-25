@@ -7,7 +7,7 @@ pack_density; after the agentic loop compacts components, that outline is
 stale (too loose). This re-fits the outer rectangle to the real footprint
 extent + margin and redraws the isolation slot continuous at its existing x.
 
-Run order in Phase D: refit_board → bridge_slot → add_zones → run_drc
+Run order in Phase D: refit_board -> bridge_slot -> add_zones -> check_zones -> run_drc
 (refit must precede bridge_slot + add_zones — both read Edge.Cuts).
 
 Output JSON includes `fill_ratio` (courtyard area / board area) — the

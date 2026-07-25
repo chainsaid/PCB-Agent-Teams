@@ -1,10 +1,27 @@
 # 工具箱参考 — 参数 + 输出 schema
 
+**目录**:`init_pcb` · `placement_brief` · `init_layout` · `get_geometry` · `move` ·
+`check_placement` · `render` · `refit_board` · `bridge_slot` · `add_zones` · `check_zones` ·
+`run_drc` · `route` —— Phase D/E 用到的 `refit_board` / `bridge_slot` / `add_zones` /
+`check_zones` / `run_drc` / `route` 都在文件后半段,别只读前 100 行。
+
 所有工具在 `scripts/tools/`,用工作区 `.venv` 的 python 跑,**JSON 打到 stdout**。
 失败一律 `{"ok": false, "error": "..."}`。
 
+⚠️ **两个例外**:`init_pcb` / `init_layout` 的实现在 `scripts/` 而非 `tools/`
+(`scripts/sch_to_pcb.py` / `scripts/place_components.py`),且它们的 stdout 是
+**人读文本 + `--- JSON ---` 分隔线之后才是 JSON** —— 直接 `json.loads(stdout)` 会炸,
+先按分隔线切。其余工具 stdout 是纯 JSON。
+
+文件清单(路径即调用目标):
+`scripts/tools/placement_brief.py` `scripts/tools/get_geometry.py` `scripts/tools/move.py`
+`scripts/tools/check_placement.py` `scripts/tools/render.py` `scripts/tools/refit_board.py`
+`scripts/tools/bridge_slot.py` `scripts/tools/add_zones.py` `scripts/tools/check_zones.py`
+`scripts/tools/run_drc.py` `scripts/tools/route.py` `scripts/tools/_kicad.py`
+`scripts/sch_to_pcb.py` `scripts/place_components.py` `scripts/drc_exclusions.py`
+
 ```bash
-PY=".venv/bin/python"
+PY=".venv/bin/python"     # 工作区根的 venv,相对路径——别写死绝对路径,换机就废
 T=".claude/skills/draw-pcb/scripts/tools"
 ```
 
@@ -58,7 +75,10 @@ courtyard{min_x,min_y,max_x,max_y,w,h} / pads[{number,x,y,w,h,net}] / nets[]`。
 "$PY" $T/move.py <pcb> --moves-json moves.json     # {"R1":[42,18,90],...}
 ```
 target (x,y) = body-bbox 中心。rot 可省(保持原旋转)。输出 `moved[] / not_found[]`。
+`-o/--out` 写到另一个 `.kicad_pcb`(不给就原地改);keep-best 存每轮快照就用它。
 只动 footprint 位置,不碰 Edge.Cuts / 走线 / zone——可在回路里反复调。
+⚠️ 但板上**已经有铜 / 桥**时,move 完那两样就 stale 了:必须重跑
+`refit_board → bridge_slot → add_zones → check_zones → run_drc`,否则桥停在旧位置、铜绕的是旧 courtyard。
 
 ## check_placement — 合法性闸门
 
@@ -95,7 +115,7 @@ target (x,y) = body-bbox 中心。rot 可省(保持原旋转)。输出 `moved[] 
 refit 补这一步。隔离槽按检测到的 x 重画为连续槽(留 3mm 上下桥),之后再跑 `bridge_slot`。
 **必须在 `bridge_slot` / `add_zones` 之前**(两者都读 Edge.Cuts)。
 输出 `board{x,y,w,h} / slot_x_mm / fill_ratio`。`fill_ratio` = courtyard 总面积 / 板面积,
-紧凑度指标(见 SKILL.md route-ready 验收)。
+紧凑度指标(阈值见 `loop.md` route-ready 验收第 7 项)。
 
 ## bridge_slot — 隔离槽留桥(Phase D)
 
@@ -113,14 +133,17 @@ refit 补这一步。隔离槽按检测到的 x 重画为连续槽(留 3mm 上�
 
 ```bash
 "$PY" $T/add_zones.py <pcb> [--layers B.Cu,F.Cu] [--nets LV_GND HV_GND] [--clearance 0.3]
+                            [--rect XMIN YMIN XMAX YMAX]
 ```
 
 - `--layers`:逗号分隔铜层,默认 `B.Cu`。
+- `--rect`:把铜限制在这个矩形内(mm),与按网/按槽算出的矩形取交集。zone 只有一个
+  clearance,表达不了逐电压的爬电距离 —— 让铜**离开高压区**用这个,别去放大 `--clearance`。
 - `--nets`:限定只铺名字含这些子串的 GND 网;不给则铺全部 GND-like 网。
   多 GND 网按域分开调用 —— 如 `--layers F.Cu --nets LV_GND` 只在正面铺低压地。
 - Phase E 布线后在 `_routed` 板上**重跑一次**,铜绕开新走线 / 过孔。
 
-## check_zones — 隔离屏障铜跨槽校验(Phase D,add_zones 之后)
+## check_zones — 隔离屏障铜跨槽校验(Phase D + Phase E 重铺后,两处都要跑)
 
 底层 `_kicad_python_helper.py` 的 `validate_zones` mode。只读,不存板。
 
@@ -129,6 +152,10 @@ refit 补这一步。隔离槽按检测到的 x 重画为连续槽(留 3mm 上�
 ```
 断言**没有任何铜 zone 跨隔离屏障**:取每个已填充 zone 的填充铜 X 跨度,
 若同一 zone 既有铜在槽左又有铜在槽右 → 跨屏障 → 退出码 1 + `crossings[]`。
+
+> ⚠️ **退出码语义不统一,别用 `&&` 串闸门**:只有 `check_zones` 用退出码 1 表示 fail。
+> `check_placement` **无论 `hard_fail` 真假都退出 0**(只有文件不存在 / 异常才 1)——
+> 必须读 JSON 里的 `hard_fail` 字段判,靠 shell 退出码会把闸门当通过。
 net/电压/网名无关,**任意单竖直隔离槽通用**。无槽 → 跳过(`slot_detected=False`,
 不误报)。横向/多段屏障未覆盖。**铺完铜跑(DRC clearance 之外的专门防线)**。
 
@@ -138,18 +165,26 @@ net/电压/网名无关,**任意单竖直隔离槽通用**。无槽 → 跳过(`
 "$PY" $T/run_drc.py <pcb>
 ```
 输出 `violation_count / unconnected_count / by_type`。
+⚠️ **会静默套用豁免**:它读项目 `.kicad_pro` 的 `drc_exclusions` 并把命中的违例从计数里
+剔掉(`scripts/drc_exclusions.py`)。所以 `violation_count = 0` 的含义是"**没有未豁免的违例**",
+不等于板子真干净。拿它当硬闸门前,先确认 `.kicad_pro` 里的豁免列表是你认可的。
 
 ## route — 自动布线(Phase E,可选)
 
 ```bash
-"$PY" $T/route.py <placed-pcb> [--output X] [--in-place] \
+"$PY" $T/route.py <placed-pcb> [--output X] [--in-place] [--keep-zones] \
       [--board-edge-clearance 0.6] [--nets PAT ...] \
       [--track-width MM] [--power-nets NET ... --power-nets-widths MM ...] \
       [--ordering {inside_out,mps,original}] [--via-size MM] [--via-drill MM] \
       [--clearance MM] [--layers LAYER ...] [--impedance OHM]
 ```
 底层 vendored KiCadRoutingTools(KRT)。默认产出 `<stem>_routed.kicad_pcb`(不覆盖
-placement 原件)。输出 `routed_single / multipoint_pads / failed / vias / recipe / output_pcb`。
+placement 原件)。输出 `routed_single / multipoint_pads / failed / vias / recipe /
+zones_stripped / output_pcb`。
+**默认剥掉副本上的铺铜再布**(`zones_stripped` 回显剥了几个;keepout / rule area 不动)——
+留着会让 KRT 判该网已连、整网跳过,重铺后碎成孤岛,原因 + 实测对照见 `routing.md`。
+`--keep-zones` 是逃生门,用了就得自己查 `unconnected`。
 **配方 flag(线宽 / 电源网 / 差分对 / ordering)是电路判断,先按 `routing_strategy.md`
-给 net 分类再定**,未设的吃 KRT 默认。**布完必跑 `run_drc`**,再 `add_zones` 重铺铜。
+给 net 分类再定**,未设的吃 KRT 默认。
+**布完先 `add_zones` 重铺(routed 板上现在没有铜),再跑 `run_drc`** —— 顺序反了全是假违例。
 需先 `build_router.py` 编译 KRT 的 Rust 模块。详见 `routing.md` + `routing_strategy.md`。

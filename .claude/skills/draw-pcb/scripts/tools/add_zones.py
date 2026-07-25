@@ -9,7 +9,7 @@ Run again after routing (Phase E) so copper re-flows around traces/vias.
 
 Usage:
   add_zones.py <board.kicad_pcb> [--layers B.Cu] [--nets LV_GND ...]
-               [--clearance 0.3]
+               [--clearance 0.3] [--rect XMIN YMIN XMAX YMAX]
 
 Wraps _kicad_python_helper.py's add_ground_zones mode (needs KiCad's pcbnew).
 """
@@ -32,6 +32,11 @@ def main() -> int:
                          "(e.g. LV_GND); default: all GND-like nets")
     ap.add_argument("--clearance", type=float, default=0.3,
                     help="zone clearance mm (default 0.3)")
+    ap.add_argument("--rect", nargs=4, type=float, metavar=("XMIN", "YMIN", "XMAX", "YMAX"),
+                    help="confine the pour to this rect (mm), intersected with "
+                         "the per-net/slot rect. A zone has one clearance, which "
+                         "cannot express per-voltage creepage — keep the pour off "
+                         "HV areas with this instead of widening --clearance")
     args = ap.parse_args()
 
     if not Path(args.pcb).exists():
@@ -45,6 +50,7 @@ def main() -> int:
         "net_filter": args.nets or None,
         "layers": [l.strip() for l in args.layers.split(",") if l.strip()],
         "clearance_mm": args.clearance,
+        "rect_mm": args.rect,
         "fill_now": True,
     }, timeout=90)
     print(json.dumps(result, ensure_ascii=False, indent=2))

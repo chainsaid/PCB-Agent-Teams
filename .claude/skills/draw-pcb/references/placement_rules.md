@@ -1,5 +1,8 @@
 # Placement(确定性种子)
 
+**目录**:4 阶段算法(分区 → 板框/槽 → 落位 → 应用) · **v2 schema 字段唯一权威源** ·
+设计原则 · 排障。项目 CLAUDE.md 的 placement 字段全集在中段的 yaml 块。
+
 draw-pcb 自带的确定性 4 阶段 placement pipeline——**只做区域划分 + 网格摆件**，不做能量优化。
 它是 **agentic 回路的种子(起点)**，不是终点：种子"够用就行"，把它摆到 route-ready
 是 SKILL.md A→D 回路的职责，**不甩给 KiCad GUI 人工补摆**。
@@ -66,6 +69,8 @@ placement:
   board_min_h: 45
   aspect_ratio: 1.4
   pack_density: 0.55
+  board_margin: 2.5                  # 板内 inset(mm)，给走线留 keepout。扁平键，非 board.margin
+  region_order: [HV, ISO, LV]        # 区域左→右排布顺序，不填按 default
 
   anchors:                           # 手动 region 强制覆盖
     J1: HV
@@ -88,7 +93,16 @@ placement:
   region_regex:                      # 仅当 default HV/ISO/LV 不适用时
     POWER:  "(?i)(\\+12v|\\+24v|vbat)"
     DIGITAL: "(?i)(d_\\w+|sclk|sda|miso)"
+  value_regex:                       # 按 value 而非 net 分区，同上仅特殊 case
+    HV: "(?i)(1206|2010)"
 ```
+
+> **本段是 placement 字段的唯一权威源**（`claude_md_constraints.md` 只管标题 + 围栏的位置约束）。
+> 实现:`scripts/placement_v2/orchestrator.py`(总控) + `scripts/placement_v2/partition.py`(A 分区)
+> + `scripts/placement_v2/floorplan.py`(B 板框/槽) + `scripts/placement_v2/layout.py`(C 落位)
+> + `scripts/placement_v2/__init__.py`。
+> 改字段前先对 `placement_v2/orchestrator.py` 的 `cfg.get(...)` 与 `floorplan.py` 的槽解析核一遍——
+> 键名对不上时 parser 静默返回 `{}` 走默认，**不报错**。
 
 ### 设计原则
 

@@ -21,13 +21,17 @@ framework is references/routing_strategy.md. Any flag left unset falls back
 to KRT's own default, so route only what the circuit needs.
 
 Usage:
-  route.py <placed.kicad_pcb> [--output X] [--in-place]
+  route.py <placed.kicad_pcb> [--output X] [--in-place] [--keep-zones]
            [--board-edge-clearance 0.6] [--nets PAT ...]
            [--track-width MM] [--power-nets NET ... --power-nets-widths MM ...]
            [--ordering {inside_out,mps,original}] [--via-size MM] [--via-drill MM]
            [--clearance MM] [--layers LAYER ...] [--impedance OHM]
 
-Output JSON: {ok, output_pcb, routed, failed, vias, recipe}.
+Output JSON: {ok, output_pcb, routed_single, multipoint_pads, failed, vias,
+recipe, zones_stripped}.
+
+Copper pours are stripped from the routed copy by default (see --keep-zones);
+re-pour with add_zones.py afterwards, THEN run DRC.
 Run run_drc.py on the output afterwards — KRT reports its own success but
 DRC is the geometric final word.
 """
@@ -48,7 +52,16 @@ def main() -> int:
     ap.add_argument("pcb", help="path to the placed .kicad_pcb")
     ap.add_argument("--output", help="output path (default <stem>_routed.kicad_pcb)")
     ap.add_argument("--in-place", action="store_true",
-                    help="route the input file itself (no copy)")
+                    help="route the input file itself (no copy). Requires "
+                         "--keep-zones: stripping zones in place would destroy "
+                         "the placement board's pour with no copy to fall back on")
+    ap.add_argument("--keep-zones", action="store_true",
+                    help="do NOT strip copper pours before routing. Default is "
+                         "to strip them: KRT reads a zone as proof its net is "
+                         "already connected (judged on the outline) and skips "
+                         "that net entirely, which leaves unconnected copper "
+                         "islands after the post-route re-pour. Re-pour with "
+                         "add_zones afterwards either way.")
     ap.add_argument("--board-edge-clearance", type=float, default=0.6,
                     help="trace-to-board-edge clearance mm (default 0.6; "
                          "the create_pcb design rule is 0.5, 0.6 keeps margin)")
@@ -104,12 +117,79 @@ def main() -> int:
                           f"{len(args.power_nets_widths)} widths)"}))
         return 1
 
+    # --in-place + zone stripping would delete the placement board's Phase D
+    # pour with no copy to fall back on, and iron rule 4 says re-routes restart
+    # from that original. Refuse instead of silently destroying it.
+    if args.in_place and not args.keep_zones:
+        print(json.dumps({"ok": False, "error":
+                          "--in-place would strip the placement board's own "
+                          "copper pour, irreversibly. Drop --in-place (the "
+                          "default writes <stem>_routed.kicad_pcb), or add "
+                          "--keep-zones if you really mean to route in place."}))
+        return 1
+
     if args.in_place:
         out = src
     else:
         out = Path(args.output) if args.output else \
             src.with_name(src.stem + "_routed.kicad_pcb")
         shutil.copy2(src, out)
+
+    # Strip copper pours before routing. KRT never treats zone copper as an
+    # obstacle, but it DOES treat a zone as proof that its net is already
+    # connected (filter_already_routed -> check_connected, judged on the zone
+    # OUTLINE, not the actual fill) — so a poured net gets skipped entirely,
+    # and the post-route re-pour can then split that copper into islands that
+    # nothing connects. An A/B run on one placement showed pour-first leaving
+    # unconnected GND islands plus a starved thermal, and strip-first leaving
+    # none. Rule areas (keepout / placement) are preserved — they are matched
+    # by their own keywords, NOT by "has no net": every zone carries a net
+    # field, so a net-based guard would never fire.
+    stripped = 0
+    if not args.keep_zones:
+        text = out.read_text(encoding="utf-8")
+        kept, i, truncated = [], 0, False
+        while True:
+            j = text.find("\n\t(zone\n", i)
+            if j < 0:
+                kept.append(text[i:])
+                break
+            kept.append(text[i:j])
+            depth, p, in_str, closed = 0, j + 1, False, False
+            while p < len(text):
+                c = text[p]
+                if c == '"' and text[p - 1] != "\\":
+                    in_str = not in_str
+                elif not in_str:
+                    if c == "(":
+                        depth += 1
+                    elif c == ")":
+                        depth -= 1
+                        if depth == 0:
+                            closed = True
+                            break
+                p += 1
+            if not closed:                      # unbalanced zone block
+                truncated = True
+                break
+            block = text[j:p + 1]
+            # Every zone carries a net field, so "has no net" can never be the
+            # guard. Rule areas are identified by their own keywords.
+            if "(keepout" in block or "(placement" in block:
+                kept.append(block)
+            else:
+                stripped += 1
+            i = p + 1
+        new_text = "".join(kept)
+        if truncated or new_text.count("(") != new_text.count(")"):
+            print(json.dumps({"ok": False, "error":
+                              "zone strip produced an unbalanced .kicad_pcb — "
+                              "aborted without writing. Re-run with "
+                              "--keep-zones and re-pour manually.",
+                              "output_pcb": str(out)}))
+            return 1
+        if stripped:
+            out.write_text(new_text, encoding="utf-8")
 
     cmd = [sys.executable, str(KRT_ROUTE), str(out), "--overwrite",
            "--board-edge-clearance", str(args.board_edge_clearance)]
@@ -172,7 +252,10 @@ def main() -> int:
         "failed": failed,
         "vias": summary.get("total_vias", 0),
         "recipe": recipe or "all KRT defaults",
-        "next": "run run_drc.py on output_pcb — DRC is the geometric final word",
+        "zones_stripped": stripped,
+        "next": ("re-pour with add_zones.py (replay every net/layer Phase D "
+                 "used), THEN run_drc.py — DRC on stale copper is all false "
+                 "clearance violations"),
     }, ensure_ascii=False, indent=2))
     return 0 if failed == 0 else 1
 

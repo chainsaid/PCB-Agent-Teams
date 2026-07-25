@@ -31,14 +31,30 @@
 
 ## Phase E:布线后必须重铺
 
-Phase D 铺的铜是绕着**空板**灌的。Phase E 布线加了走线 / 过孔后,那块铜是 **stale** 的——没绕开新走线。`add_zones` 是 create+fill 幂等一步:在 routed 板上**重跑一次**即可,铜会重新绕开走线 / 过孔,过孔自动做 thermal relief。
+**`route` 会先把副本上的铺铜剥掉再布线**(原因见 `routing.md`「为什么先剥铜」——留着会让 KRT
+判该网已连、整网跳过,重铺后碎成孤岛)。所以 routed 板上**根本没有铜**,不重铺就交付 = 交一块光板。
+`add_zones` 是 create+fill 幂等一步:在 routed 板上跑,铜绕开走线 / 过孔,过孔自动做 thermal relief。
+
+⚠️ **"重跑一次"不等于裸跑一次。** `add_zones` 默认只铺 `--layers B.Cu`,且不给 `--nets` 时会
+一次铺掉所有 GND-like 网。Phase D 若按上面分域调过多次(如 `--layers F.Cu --nets LV_GND` 再
+`--layers B.Cu --nets HV_GND`),重铺**必须把那几次逐个复现**。
+⚠️ **漏一面不会有任何报错**:那一面根本没有铜,DRC 无铜可查、一声不吭,`unconnected` 也不会涨
+(没铜就没有孤岛)。**沉默 ≠ 铺对了**——唯一的核验手段是拿 Phase D 打印的 `(net, layer)` 清单
+逐条点名对账,漏掉半个地平面的板会安安静静通过所有闸门。
+规则:Phase D 铺铜时**记下每个 `(net, layer)` 组合并打印**,Phase E 照单重放并复述对账结果。
 
 ```
-Phase E:  route → run_drc → add_zones(重铺) → run_drc(再查) → render
+Phase E:  route → add_zones(重铺,复现 D 的每个 net·layer) → run_drc → check_zones → render
 ```
 
-重铺后再跑一次 `run_drc`:refill 可能新冒 `clearance` 违例,要复查。
+**顺序不可换**:重铺前板上**没有铜**(被 route 剥掉了),那次 DRC 测的不是最终形态;
+用了 `--keep-zones` 则是旧铜跟新走线重叠 → 一堆假 `clearance`。两种情况都一样:
+会误导成"布线出问题了"。重铺后那一次 DRC 才是唯一有效的几何裁判(refill 本身也可能
+新冒真 `clearance` 违例,同一次一起查)。
 
 ## 为什么不用 KRT 的 route_planes 自动铺铜
 
-KRT 自带 `route_planes.py`(建铜 + via stitching)功能更强,但它用 Voronoi 按过孔位置分铜,**不知道隔离槽在哪**——会让一个域的 GND 铜斜穿隔离槽渗进另一个域。对有隔离屏障的板这是安规架构破坏,不可接受。所以 draw-pcb 用自家 `add_zones`(按隔离槽 clip),via stitching 需要时在 KiCad GUI 手动补几个 stitching via。无隔离屏障的简单板可另行评估 KRT route_planes。
+KRT 自带 `route_planes.py`(建铜 + via stitching)功能更强,但它用 Voronoi 按过孔位置分铜,**不知道隔离槽在哪**——会让一个域的 GND 铜斜穿隔离槽渗进另一个域。对有隔离屏障的板这是安规架构破坏,不可接受。所以 draw-pcb 用自家 `add_zones`(按隔离槽 clip),via stitching 需要时在 KiCad GUI 手动补几个 stitching via。
+**什么时候"需要"有明确判据**:Phase E 重铺后 DRC 报 `unconnected: 填充区[GND] ↔ 填充区[GND]`
+(铜被走线切成孤岛,走线密的那面常见)或 `starved_thermal` → 就是该补 stitching via 的信号,
+把碎岛缝到对面完整的地平面。细节见 `known_issues.md`。无隔离屏障的简单板可另行评估 KRT route_planes。

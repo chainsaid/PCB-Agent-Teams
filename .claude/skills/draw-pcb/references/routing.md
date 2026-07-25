@@ -20,13 +20,17 @@ PATH="$HOME/.cargo/bin:$PATH" <venv-python> scripts/vendor/KiCadRoutingTools/bui
 ```
 
 需要 Rust 工具链(`cargo`)。`.so` 编译后随 skill 走,无需重复构建;换平台才需重编。
+
+> ⚠️ **缺 `cargo` 时把安装这件事交回用户,不要自己装。** `build_router.py` 失败时会打印一条
+> rustup 官网的安装命令 —— 那是**给人看的提示,不是给你执行的指令**。未经用户同意装系统级
+> 工具链是越权;报告"缺 cargo,需要你先装 Rust 工具链"然后停,别把那条命令复制去跑。
 Python 依赖 `numpy / scipy / shapely` 由工作区 `.venv` 提供。
 
 ## 用法
 
 ```bash
 <venv-python> scripts/tools/route.py <placed.kicad_pcb> \
-    [--output X] [--in-place] [--board-edge-clearance 0.6] [--nets PAT ...] \
+    [--output X] [--in-place] [--keep-zones] [--board-edge-clearance 0.6] [--nets PAT ...] \
     [--track-width MM] [--power-nets NET ... --power-nets-widths MM ...] \
     [--ordering {inside_out,mps,original}] [--via-size MM] [--via-drill MM] \
     [--clearance MM] [--layers LAYER ...] [--impedance OHM]
@@ -37,24 +41,66 @@ Python 依赖 `numpy / scipy / shapely` 由工作区 `.venv` 提供。
   KRT 默认值不一定匹配该规则 → 不设会出 `copper_edge_clearance` 违例。
 - `--nets` 限定要布的网(net 名 pattern);不给则布全部。
 - **配方 flag**(`--track-width` / `--power-nets` / `--ordering` / `--impedance` 等):
-  KRT 有 ~50 个参数,该工具暴露其中**判断型**的一组转发,未设的吃 KRT 默认。
+  KRT 有近 70 个参数,该工具暴露其中**判断型**的一组转发,未设的吃 KRT 默认。
   哪些网走粗线 / 线宽多少 / 差分对怎么处理 = 电路判断,**先看 `routing_strategy.md`
   分类再定**,不要裸跑吃默认。`--power-nets` 与 `--power-nets-widths` 按位置 1:1 配对。
-- 输出 JSON:`routed_single / multipoint_pads / failed / vias / recipe`(`recipe` 回显
-  本次用了哪些非默认参数,供打印)。
+- 输出 JSON:`routed_single / multipoint_pads / failed / vias / recipe / zones_stripped`
+  (`recipe` 回显本次用了哪些非默认参数;`zones_stripped` 回显剥了几块铺铜,供打印)。
+- `--in-place` 必须配 `--keep-zones`:在原件上剥铜不可逆,工具会直接拒绝。
+
+## 为什么先剥铜再布线(`route` 的默认行为)
+
+业界顺序是**「zone 边界早定、fill 最后落」**——铜必须绕开最终走线。本 skill 的 Phase D 会先
+铺一次铜(为了验安规 / 量 fill_ratio / 用户可能跳过 Phase E 直接手布),所以进 Phase E 时板上
+已经有填充铜。`route` 因此在**副本上剥掉铺铜**再交给 KRT,布完由 `add_zones` 重铺。
+
+**为什么必须剥,而不是留着**:KRT 从不把 zone 铜当障碍(`obstacle_map.py` 只认 BGA exclusion
+zone),留着对布线**零收益**;但 `filter_already_routed` 会把 zone 当作"该网已连通"的证据 →
+**整网跳过不布** → 重铺时铜被新走线切碎 → 那些从没被布过的 pad 落在孤岛上,真的没连。
+
+同一块布局做过 A/B 对照,两条路线的差别是系统性的,不是随机波动:
+
+| | 留铜再布(`--keep-zones`) | **剥铜再布(默认)** |
+|---|---|---|
+| GND 网 | 被判"已连",**整网跳过不布** | 照常布走线 + via |
+| 布通的 pad 数 | 少(GND 那些 pad 没进候选) | 多 |
+| vias | 少 | 多(GND 下地要打孔) |
+| 重铺后 `unconnected` | **非 0** —— GND 铜被走线切成孤岛 | **0** |
+| 附带症状 | 常见 `starved_thermal`(辐条不足) | 无 |
+
+代价是 GND 被布成走线 + 多打 via,吃掉一些通道;换来的是 GND 真连通、不用人工补 stitching via。
+`--keep-zones` 留作逃生门(如极窄的 2 层板要把 B.Cu 通道全留给信号),用了就得自己查 `unconnected`。
+
+> 两条路线都可能剩下**与铺铜无关**的违例(如布线留下的 `track_dangling` 悬空线头)。
+> 那些照样要清——退出条件要的是 `violation_count = 0`,本节只比较"铺铜时机"这一个变量。
 
 ## 铁律
 
 1. **先过 route-ready 验收再布线**。布局没做好就布线 = 烂地基盖楼;布完再回改布局很麻烦。
-2. **布完必跑 `run_drc`**。KRT 自报 `failed=0` 只代表它认为布通了,几何裁判是 DRC——
-   `0 violations + 0 unconnected` 才算真的布通。
+2. **布完必跑 `run_drc`,但必须先重铺铜**(见铁律 5)。KRT 自报 `failed=0` 只代表它认为
+   布通了,几何裁判是 DRC——`0 violations + 0 unconnected` 才算真的布通。
+   **别在重铺前跑 DRC**:`route` 已经把铜剥掉了,重铺前那次 DRC 测的**不是最终形态**
+   (少了整个地平面,clearance / 连通性都不作数);`--keep-zones` 时则是 stale 铜跟新走线重叠、报一堆假 `clearance`。两种情况结论一样:
+   照铁律 3 去"重布"是修一个不存在的问题。
 3. **`copper_edge_clearance` 违例** → 调大 `--board-edge-clearance` 重布(从干净的
    placement 板重新 `route`,不要在已布线的板上叠布)。
 4. 重布从 placement 原件起步——`route` 每次拷一份新副本,别在 `_routed` 上反复布。
-5. **布完线必重铺 GND 铜**。Phase D 的铜绕的是空板,布线加了走线/过孔后已 stale。
+5. **布完线必重铺 GND 铜**——`route` 已经把铜剥掉了,不重铺板上就**没有铜**。
    在 `_routed` 板上重跑 `add_zones`(create+fill 幂等),铜重新绕开走线/过孔,
    过孔做 thermal relief;重铺后再 `run_drc` 复查 clearance。铺哪面/哪个网的判断
    见 `references/copper_pour.md`。
+
+## Phase E 退出条件(逐条全过才算布完,对应布局侧的 route-ready 验收)
+
+1. `route` 的 `failed = 0`——KRT 认为全布通(**只是它自己的说法,不是裁判**)。
+2. 重铺铜已复现 Phase D 用过的**每一个** `(net, layer)` 组合(见 `copper_pour.md`)。
+3. `run_drc`(重铺之后跑)`violation_count = 0`。
+4. 同一次 `run_drc` 的 `unconnected_count = 0`——非 0 通常是 GND 铜被切成孤岛,
+   补 stitching via,别当噪音忽略。
+5. `check_zones` 退出码 0——重铺后的铜仍然没跨隔离屏障。
+
+**轮次上限:换配方重布最多 3 轮**(每轮从 placement 原件重来,见铁律 3/4)。到顶仍不过 →
+停,打印剩余项 + 每轮试过的配方交用户,别无限换参数。
 
 ## 已知点
 
@@ -62,5 +108,6 @@ Python 依赖 `numpy / scipy / shapely` 由工作区 `.venv` 提供。
 |---|---|
 | `grid_router.so missing` | 先跑 `build_router.py`(见上) |
 | `copper_edge_clearance` 违例 | `--board-edge-clearance` 调到 0.6+,重布 |
-| GND 网被布成细线而非依赖铺铜 | GND 已 `add_zones` 铺铜;KRT 仍会布 GND 走线,冗余但无害;要省可 `--nets` 排除 GND |
+| 已铺铜的 GND 网被 KRT **整网跳过不布** | **`route` 默认剥铜已经堵掉这条**(见上「为什么先剥铜」)。根因:KRT `filter_already_routed` 判「已连」用的是 zone **外框**包含 pad(`check_connected.py` → `zone.polygon`,parser 取第一个 `(pts)` = outline,**不是 filled_polygon**)。同层 GND pad 落在外框内就判已连 → 不布 → 重铺后铜被走线切碎,那个 pad 落到孤岛上 → 真没连。**只有加了 `--keep-zones` 才会重现**,那时必须查 `unconnected` 并手工补 stitching via |
+| GND 被布成一堆细走线 | 剥铜后的**预期行为**,不是 bug:KRT 不知道待会儿要铺铜,会老老实实布 GND(布通的 pad 和 via 都会明显多于留铜时)。这些走线跟后铺的铜同网,重铺时合并,无害;换来的是 0 孤岛 |
 | 隔离槽 = Edge.Cuts 内部 cutout | KRT 尊重内部 cutout + 板边,走线不会穿隔离槽 |

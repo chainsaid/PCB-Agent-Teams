@@ -1016,6 +1016,12 @@ def mode_add_ground_zones(spec):
       clearance_mm: default 0.3
       slot_inset_mm: gap from slot edge (default 1.5)
       board_inset_mm: gap from board edge (default 0.5)
+      rect_mm: optional [x_min, y_min, x_max, y_max] in mm. Confines the pour
+        to that rectangle, INTERSECTED with the per-net rect (so the isolation
+        slot clip still applies and a caller rect can never push copper across
+        the barrier). A single zone carries one clearance, which cannot express
+        a per-voltage creepage rule — on boards with HV nodes the caller passes
+        a rect that keeps the pour off the HV area instead.
       fill_now: bool, run zone filler immediately after add (default True)
     """
     pcb_path = spec["pcb_path"]
@@ -1082,9 +1088,15 @@ def mode_add_ground_zones(spec):
     # and DRC reports zones_intersect for same-net overlaps.
     target_keys = {(code, lid) for code, _name in target_nets for _ln, lid in layer_ids}
     zones_removed = 0
+    # board.Remove() hands ownership back to Python. Dropping the last ref frees the
+    # C++ ZONE, the allocator hands the address to the ZONE we create below, and SWIG
+    # returns the dead proxy for zone.Outline() -> AttributeError on AddOutline.
+    # Keep the removed zones alive until this mode returns.
+    removed_keepalive = []
     for z in list(board.Zones()):
         if (z.GetNetCode(), z.GetLayer()) in target_keys:
             board.Remove(z)
+            removed_keepalive.append(z)
             zones_removed += 1
 
     def net_priority(name):
@@ -1095,14 +1107,24 @@ def mode_add_ground_zones(spec):
             return 10
         return 0
 
+    rect_mm = spec.get("rect_mm")
+    caller_rect_iu = ([pcbnew.FromMM(float(v)) for v in rect_mm]
+                      if rect_mm else None)
+
     def net_outline_rect(name):
         """Return outline rect (x_min, y_min, x_max, y_max) in IU based on net role."""
         upper = name.upper().lstrip("/")
         if slot_left_iu is not None and "HV" in upper:
-            return bx_min, by_min, slot_left_iu, by_max
-        if slot_right_iu is not None and "LV" in upper and "HV" not in upper:
-            return slot_right_iu, by_min, bx_max, by_max
-        return bx_min, by_min, bx_max, by_max  # plain /GND or no slot detected
+            r = (bx_min, by_min, slot_left_iu, by_max)
+        elif slot_right_iu is not None and "LV" in upper and "HV" not in upper:
+            r = (slot_right_iu, by_min, bx_max, by_max)
+        else:
+            r = (bx_min, by_min, bx_max, by_max)  # plain /GND or no slot detected
+        if caller_rect_iu is None:
+            return r
+        # Intersect, never union: the slot clip stays authoritative.
+        return (max(r[0], caller_rect_iu[0]), max(r[1], caller_rect_iu[1]),
+                min(r[2], caller_rect_iu[2]), min(r[3], caller_rect_iu[3]))
 
     zones_added = []
     for net_code, net_name in target_nets:

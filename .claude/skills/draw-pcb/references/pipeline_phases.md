@@ -1,7 +1,17 @@
 # Pipeline Phase 详细说明
 
-> draw-pcb 内部 phase（不等于工作区 Phase 0–8；整个 draw-pcb 属于工作区 Phase 4）。
-> 所有 phase fail-fast，每步输出 JSON。**不做自动走线**——走线归用户在 KiCad GUI 手画。
+**目录**:phase 总览 · 板框 + 隔离槽几何 · 输出 schema · L2 视觉验证清单 · 典型完整流程。
+只有「板框 + 隔离槽几何」一节对主推回路有用,其余描述的是非主推的一键路径。
+
+> ⚠️ **本文件描述的是 `scripts/pipeline.py` 这条一键路径，不是 draw-pcb 的主推流程。**
+> 主推流程是 SKILL.md 的**工具箱 + A→D agentic 回路**（判断走回路、机械走脚本）。
+> 两者差异要清楚：`pipeline.py` 的 Phase 2.8 是**无脑单面 B.Cu 铺地**，正是 `copper_pour.md`
+> 点名的反模式；它也不跑 route-ready 验收、不跑 Phase E。**默认别用它**——读本文件是为了看
+> 板框 / 隔离槽几何怎么算、各 phase 的 JSON 长什么样，不是为了照它跑。
+>
+> draw-pcb 内部 phase（不等于工作区 Phase 0–5；整个 draw-pcb 属于工作区 Phase 4）。
+> 所有 phase fail-fast，每步输出 JSON。`pipeline.py` 自身不布线；**自动布线在 SKILL.md 的
+> Phase E**（KRT），或由用户在 KiCad GUI 手布——不是"draw-pcb 不做走线"。
 
 ```
 Phase 0:   Pre-flight       SCH + project CLAUDE.md + KiCad CLI + bundled Python
@@ -20,8 +30,8 @@ Phase 3:   DRC              kicad-cli pcb drc，结构化 JSON
 Phase 4:   PDF / SVG        kicad-cli pcb export，给 Claude L2 视觉验证
 Phase 5:   EMC              optional，调 check-pcb 的 analyze_emc.py 出风险报告
 Phase 6:   Design review    optional，release/scripts/kidoc 出 markdown + PDF
-              ↓ 生成完成后切给用户：KiCad GUI 手动走线
-              ↓ 走完线重跑 pipeline 拿最终 DRC + 视觉
+              ↓ 生成完成后走线三选一：Phase E 自动布线(KRT) / 用户 GUI 手布 / 先不布
+              ↓ 走完线重跑 DRC + 视觉（自动布线路径见 SKILL.md Phase E，含重铺铜）
 Phase 7+ ↓ check-pcb skill：pcb analyzer / EMC / thermal / cross-ref / parasitic SPICE / gerber audit
          ↓ release skill：Design Review / HDD / 文档 + Gerber + vendor 决策
 ```
@@ -61,7 +71,7 @@ Phase 7+ ↓ check-pcb skill：pcb analyzer / EMC / thermal / cross-ref / parasi
     "emc":         {"ok": true, "findings_count": 11,
                     "by_severity": {"info": 6, "warning": 3, "error": 2}}
   },
-  "next_step": "Open the PCB in KiCad GUI and route by hand."
+  "next_step": "Route it: Phase E auto-route (scripts/tools/route.py, then re-pour zones, then run_drc) or hand-route in the KiCad GUI. Re-run DRC + visuals afterwards."
 }
 ```
 
@@ -114,7 +124,7 @@ $ python pipeline.py Projects/<name>/kicad
 
 ```
 1. Claude Read PDF 做 L2 视觉验证（分区、间距、decoupling 贴紧）
-2. 用户在 KiCad GUI 手动走线
-3. 重跑 pipeline 拿最终 DRC + 视觉
+2. 走线三选一：Phase E 自动布线（KRT）/ 用户 GUI 手布 / 先不布
+3. 重跑 DRC + 视觉（自动布线路径必须先重铺铜再 DRC，见 SKILL.md Phase E）
 4. 切给 check-pcb 做深度检查 / release 出货
 ```

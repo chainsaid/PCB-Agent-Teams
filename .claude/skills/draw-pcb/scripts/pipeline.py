@@ -16,9 +16,10 @@ Phases (all fail-fast, JSON output):
   5.  EMC (opt)   : runs check-pcb's analyze_emc if --with-emc
   6.  Doc (opt)   : design review markdown + PDF if --with-design-review
 
-Hand routing is intentional: this pipeline does not auto-route. After the
-pipeline finishes, open the PCB in KiCad GUI and route by hand (or hand to
-another router of your choice).
+This one-shot pipeline does not route. Auto-routing lives in the skill's
+Phase E (scripts/tools/route.py, KRT) — see SKILL.md. After this pipeline
+finishes, pick one: run Phase E, route by hand in the KiCad GUI, or skip
+routing and go straight to review.
 """
 import argparse
 import json
@@ -641,8 +642,9 @@ def _finalize(phases: Dict, all_ok: bool) -> Dict:
     else:
         print("✗ draw-pcb pipeline finished with errors")
 
-    next_step = ("Open the PCB in KiCad GUI and route by hand. "
-                 "Re-run pipeline afterwards for final DRC + visuals.")
+    next_step = ("Route it: Phase E auto-route (scripts/tools/route.py, then "
+                 "re-pour zones, then run_drc) or hand-route in the KiCad GUI. "
+                 "Re-run DRC + visuals afterwards.")
     return {"ok": all_ok, "phases": phases, "next_step": next_step}
 
 

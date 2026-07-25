@@ -1,5 +1,8 @@
 # `_kicad_python_helper.py` 模式参考
 
+实现文件:`scripts/_kicad_python_helper.py`(所有 mode 的宿主,跑在 KiCad bundled python)。
+一键路径入口:`scripts/pipeline.py`(**非主推流程**,细节见 `references/pipeline_phases.md`)。
+
 > 在 KiCad bundled Python 里跑（pcbnew API），通过 subprocess + JSON spec 文件被主入口调。
 > 不允许字符串拼接 .kicad_pcb 文件。
 
@@ -13,6 +16,13 @@
 | `ensure_pads_in_board` | .kicad_pcb + margin_mm | 任何 pad/body 落到 Edge.Cuts 外的元件滑回板内 |
 | `add_ground_zones` | .kicad_pcb + keywords + layers | 给每个 GND-like net 加 zone，**先按 (net,layer) 去重清掉已有 zone**，HV_GND clip 到 slot 左半多边形、LV_GND clip 到 slot 右半多边形、其它 GND 全板矩形；不同 net 不同 priority；支持 `fill_now=True` 跑 ZONE_FILLER。绕过 kct zones batch 的 net 解析 bug |
 | `validate_zones` | .kicad_pcb (只读) | 校验**没有铜 zone 跨隔离屏障**：检测单条竖直隔离槽 `[left,right]`，对每个已填充 zone 取**填充铜**的 X 跨度，若同一 zone 既有铜在 `x<left` 又有铜在 `x>right` → 跨屏障 → `verdict="fail"` + `crossings[]`。net/电压/网名无关。无槽时 `slot_detected=False` 跳过（不误判）。横向/多段屏障未覆盖 |
+
+| `move_footprints` | .kicad_pcb + `{ref: [x,y,rot]}` | 按 body-bbox center 移动 / 旋转指定 footprint,不碰 Edge.Cuts / 走线 / zone。`move` 工具的底层 |
+| `bridge_slots` | .kicad_pcb + barrier 器件 | 重画隔离槽,在每个跨槽 barrier 器件下方留实体桥。`bridge_slot` 工具的底层 |
+| `refit_board` | .kicad_pcb + margin | Edge.Cuts 外框 + 隔离槽缩到 footprint 实际范围 + margin,返回 `fill_ratio`。`refit_board` 工具的底层 |
+
+> 上表 11 个就是 `MODES` 全集(与 `_kicad_python_helper.py` 末尾的 dispatch 表一一对应)。
+> 加 mode 必须同步这张表,否则「改脚本 → 读 helper_modes.md」这条路由会漏掉新能力。
 
 ## Spec 字段约定
 
@@ -44,7 +54,7 @@
 | HV_GND × LV_GND zone 重叠 | 两个 net 都用全板矩形 outline 且同 priority | helper 按 net 类型 clip outline + 不同 priority |
 | 去耦电容跟 ISO IC 输出 pad 短路 | 老 placement 把 LV_GND 电容贴 U1 输出脚 | apply_layout 末尾的 pad-pad 扫描兜底（layout v2 提前 snap，正常路径下默认 skip）|
 | 走线靠板边 (copper_edge_clearance) | board edge clearance 没写进 design rule | create_pcb 注入 0.5mm 规则 |
-| KiCad ratsnest 不识别 zone fill 提供的连接（DRC unconnected 误报）| | 用 `analyze_pcb.py` + EMC skill 检查 zone 几何 |
+| ~~KiCad ratsnest 不识别 zone fill 的连接（unconnected 误报）~~ **已证伪，别再当误报忽略** | 实测：铺了铜的 GND 网 0 unconnected，没铺铜的 GND 网照报 → DRC **认** zone fill 的连通 | `unconnected` 是可信信号。Phase E 重铺后它指向真孤岛,处理见 `references/known_issues.md` |
 | `BOARD_DESIGN_SETTINGS.SetCopperEdgeClearance` 不存在 (KiCad 10) | KiCad 10 把 setter 删了 | 直接赋 struct 成员 `ds.m_CopperEdgeClearance = pcbnew.FromMM(0.5)` |
 | `PCB_SHAPE.IsVisible / SetVisible` 不存在 (KiCad 10) | graphics 没有 visibility 属性 | 改 layer 到 `Cmts.User`（DRC + fab silk export 自动忽略），不要 Remove |
 | 多 ISO IC（≥3）固定 step 把后面的 IC clamp 重叠 | iso_y 越界后被 clamp 到 y_bot，多个 IC 叠在一起 | 动态分配：`iso_step = max(ISO_SLOT_HEIGHT, iso_band/n)` |
