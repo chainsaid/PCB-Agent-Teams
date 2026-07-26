@@ -949,7 +949,11 @@ def format_text_report(result: dict) -> str:
     lines.append("")
 
     score = summary.get("thermal_score", 0)
-    lines.append(f"Thermal score:   {score}/100")
+    if score is None:
+        lines.append("Thermal score:   NOT ASSESSED "
+                     "(no component dissipation data reached this analyzer)")
+    else:
+        lines.append(f"Thermal score:   {score}/100")
     lines.append(f"Ambient temp:    {summary.get('ambient_c', 25)}°C")
     # Airflow line only when forced air is in effect (still-air output
     # stays byte-identical to prior versions).
@@ -1095,7 +1099,8 @@ def main():
                 "low": "int — deprecated, retained for consumer compat",
                 "info": "int — deprecated, retained for consumer compat",
                 "by_severity": "{error: int, warning: int, info: int}",
-                "thermal_score": "float (0-100)",
+                "thermal_score": "float (0-100), or null when nothing was assessed",
+                "thermal_score_status": "'assessed' | 'not_assessed' — null score means no dissipation data, NOT a clean board",
                 "airflow_lfm": "float — resolved air velocity (0 = still air)",
                 "airflow_factor": "float — Rθ_JA multiplier applied for airflow (1.0 = still air)",
             },
@@ -1197,9 +1202,16 @@ def main():
     except NameError:
         pass  # project_config not available
 
-    # Score (only active findings)
-    score = compute_thermal_score(
-        [f for f in findings if not f.get("suppressed")])
+    # Score (only active findings). With nothing assessed there is no evidence
+    # to score: a bare 100 reads as "thermal design is fine" when the truth is
+    # that no dissipation data reached this analyzer at all.
+    if assessments:
+        score = compute_thermal_score(
+            [f for f in findings if not f.get("suppressed")])
+        score_status = "assessed"
+    else:
+        score = None
+        score_status = "not_assessed"
 
     # Severity counts over the rule findings (thermal_assessments are
     # merged into findings[] further down and contribute info-level
@@ -1244,6 +1256,7 @@ def main():
             # per-severity aliases were removed in v1.3 Batch 20).
             "by_severity": dict(counts),
             "thermal_score": score,
+            "thermal_score_status": score_status,
             **board,
         },
         "findings": findings,
@@ -1283,6 +1296,9 @@ def main():
     from output_filters import apply_output_filters
     apply_output_filters(result, args.stage, args.audience)
 
+    score_txt = "NOT ASSESSED (no dissipation data)" if score is None \
+        else f"score {score}/100"
+
     # Determine output path
     output_path = args.output
     analysis_dir_mode = (not output_path
@@ -1312,12 +1328,12 @@ def main():
         else:
             out_path = os.path.join(analysis_dir, filename)
         print(f"Thermal analysis complete: {len(findings)} findings "
-              f"(score {score}/100) -> {out_path}", file=sys.stderr)
+              f"({score_txt}) -> {out_path}", file=sys.stderr)
     elif output_path:
         with open(output_path, "w") as f:
             json.dump(result, f, indent=2)
         print(f"Thermal analysis complete: {len(findings)} findings "
-              f"(score {score}/100) -> {output_path}", file=sys.stderr)
+              f"({score_txt}) -> {output_path}", file=sys.stderr)
     elif args.text:
         if args.audience:
             from output_filters import format_text

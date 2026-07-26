@@ -27,8 +27,22 @@
 ### 电源网识别(--power-nets)
 配电干线(一个网喂多颗 IC / 多个 pad)、已知大电流支路,都该进 `--power-nets`。KRT 原生支持给指定网单独走粗线,这是它的核心能力,别漏用。
 
-### 差分对(--impedance)
-名字成对、功能上需要阻抗匹配的网(ADC 差分输入、高速串行等)用 `--impedance` 设目标阻抗。注意:**主 `route` 不做 P/N 等长 / 受控间距**——那是 KRT `route_diff.py` 专用布线器的活,当前 draw-pcb 未包装它。需要严格等长时在 KiCad GUI 手动处理,或单独跑 KRT route_diff。
+> 名字有误导:`--power-nets` 收的是**任意网名 pattern**,不限电源。任何"这几个网要走
+> 别的宽度"的需求都用它 + `--power-nets-widths` 配对表达(差分对要求 ≥ 某宽度也走这条)。
+> 它只在**布线那一刻**生效——线已经布完再想改宽,不是这个参数的事,得重布。
+
+### 差分对(--impedance / --length-match-group)
+名字成对、功能上需要阻抗匹配的网(ADC 差分输入、高速串行等)用 `--impedance` 设目标阻抗。
+
+**等长是能做的**,别推给 GUI:`--length-match-group P N` 让 KRT 给短的那根加蛇形补长,
+`--length-match-tolerance` 给容差,`--meander-amplitude` 给蛇形幅度。实测一对 RS485:
+不设等长 delta = 0.69mm;`--length-match-group` + `--length-match-tolerance 0.05
+--meander-amplitude 0.5` 后 delta = 0.076mm。
+
+⚠️ **蛇形塞不进去时会静默不动**:同一对网只给 `--length-match-group`(幅度吃默认 1.0mm)
+时 delta 仍是 0.69mm——通道装不下 1.0mm 幅度,一根蛇形都没加,**工具不报错**。
+规则:窄通道把 `--meander-amplitude` 调小(0.3~0.5mm),**并且每次都用 `net_metrics.py
+--pairs "P,N"` 量 delta**。「我传了等长参数」不是等长的证据,量出来的 delta 才是。
 
 ### 布线顺序(--ordering)
 - `inside_out`(KRT 默认):多数板适用,从板内向外布。
@@ -36,8 +50,22 @@
 - `original`:复布场景,保持原网表顺序。
 布不通时,换 ordering 是低成本的第一手,优先于改线宽 / 加层。
 
-### via 尺寸(--via-size / --via-drill)
-默认通常够用。仅在大电流过孔需要加粗、或 fab 钻孔能力有下限时才调。
+`--ordering` 只有这三种算法,**没有「让某些网先布」的参数**。要指定顺序就分两遍跑:
+第一遍 `--nets <关键网>`,第二遍在**第一遍的产物上**布其余(不传 `--nets`)。
+KRT 会跳过已布通的网,第一遍的走线原样保留——实测一对 RS485 第一遍布完
+(delta 0.69 / via 2·0),第二遍又布了 67 个网,该对的长度与过孔数**一字不差**。
+
+### via 尺寸与过孔预算(--via-size / --via-drill / --via-cost / --layer-costs)
+尺寸:默认通常够用。仅在大电流过孔需要加粗、或 fab 钻孔能力有下限时才调。
+
+**数量**靠代价压,不是靠上限——KRT 没有「每网最多几个过孔」这种硬参数,只有换层代价:
+- `--via-cost N`:每个过孔的 A* 惩罚(默认 50,单位=栅格步长)。调高 → 换层变贵 → 宁可绕远。
+- `--via-proximity-cost`:细间距 / stub 邻近区的过孔倍率(0 = 该区禁打过孔)。
+- `--layer-costs`:按层的代价乘子,与 `--layers` 位置配对。两层板想让底层多留给地平面就调高它。
+
+⚠️ **这是代价不是上限,而且要拿布通率换**:实测同一块板全网布线,`--via-cost 50 → 400`
+过孔数 192 → 109(−43%),但布通 69 → 38、失败 6 → 9。**过孔预算和布通率是同一个方向盘的两头**,
+调完必须用 `net_metrics.py --max-vias N` 量真实过孔数 + 看 `failed`,别只调参数不看代价。
 
 ## 与其它阶段的衔接
 - 布线**必须先过 route-ready 验收**(见 SKILL.md)——烂布局上布线 = 烂地基盖楼。

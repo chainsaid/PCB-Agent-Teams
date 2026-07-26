@@ -10,6 +10,7 @@ Run again after routing (Phase E) so copper re-flows around traces/vias.
 Usage:
   add_zones.py <board.kicad_pcb> [--layers B.Cu] [--nets LV_GND ...]
                [--clearance 0.3] [--rect XMIN YMIN XMAX YMAX]
+               [--pad-connect {thermal,solid,none}]
 
 Wraps _kicad_python_helper.py's add_ground_zones mode (needs KiCad's pcbnew).
 """
@@ -37,6 +38,13 @@ def main() -> int:
                          "the per-net/slot rect. A zone has one clearance, which "
                          "cannot express per-voltage creepage — keep the pour off "
                          "HV areas with this instead of widening --clearance")
+    ap.add_argument("--pad-connect", choices=["thermal", "solid", "none"],
+                    default="thermal",
+                    help="how the pour meets pads. thermal (default) = spoked "
+                         "relief, easy to hand-solder but each spoke needs "
+                         "room, so crowded pads end up starved. solid = full "
+                         "contact, no spokes to starve, but every pad becomes "
+                         "a heat sink (fine for reflow, harder for rework)")
     args = ap.parse_args()
 
     if not Path(args.pcb).exists():
@@ -51,6 +59,7 @@ def main() -> int:
         "layers": [l.strip() for l in args.layers.split(",") if l.strip()],
         "clearance_mm": args.clearance,
         "rect_mm": args.rect,
+        "pad_connect": args.pad_connect,
         "fill_now": True,
     }, timeout=90)
     print(json.dumps(result, ensure_ascii=False, indent=2))

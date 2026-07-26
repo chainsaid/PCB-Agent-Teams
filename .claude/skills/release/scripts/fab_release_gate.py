@@ -297,6 +297,14 @@ def check_thermal(thermal_data: Optional[Dict]) -> List[Dict]:
                         {"high_count": len(highs)})]
     else:
         score = thermal_data.get("summary", {}).get("thermal_score", "?")
+        if score is None:
+            # No dissipation data reached the analyzer, so "no findings" is the
+            # absence of evidence, not evidence of a cool board. Passing here
+            # would sign off a thermal design nothing ever looked at.
+            return [_check("thermal", "thermal_risk", "skip",
+                            "thermal not assessed — no component dissipation "
+                            "data (run check-schematic first so power figures "
+                            "reach the thermal analyzer)")]
         return [_check("thermal", "thermal_risk", "pass",
                         f"Thermal score {score}/100 — no critical/high findings")]
 

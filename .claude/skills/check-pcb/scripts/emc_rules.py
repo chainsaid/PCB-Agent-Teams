@@ -381,6 +381,9 @@ def check_return_path_coverage(pcb: Dict, severity_threshold: str = 'all') -> Li
             nets=[net_name],
             recommendation=(
                 'Route this signal to avoid ground plane gaps, or fill the void. '
+                'On a 2-layer board the gaps are usually where back-side tracks '
+                'cut the pour into islands — stitch the two pours together '
+                '(draw-pcb stitch_zones) so return current has a way across. '
                 'If a split is intentional, add a bridge capacitor across the gap.'
             ),
             confidence='heuristic',

@@ -1,6 +1,15 @@
 ---
 name: draw-pcb
-description: KiCad PCB component-placement expert (Phase 4) — an AI toolbox plus an agentic placement loop, not a one-shot pipeline. ALWAYS invoke this skill when placing components into a .kicad_pcb from a frozen schematic + project CLAUDE.md, doing HV/LV/ISO region partitioning, isolation-barrier placement, or GND copper pour. Do not string-concatenate .kicad_pcb, place before reading placement_brief, default rot=0 on isolation/polarized parts, or treat check_placement's score as an objective to minimize. Use this skill first. Optional Phase E auto-routes via the vendored KiCadRoutingTools (KRT). Deep review (analyzer / EMC / thermal / cross-ref) belongs to check-pcb. Triggers: 画 PCB / PCB 布局 / 摆元件到 PCB / 区域分区 / 隔离屏障 / GND zone / 自动布局 / 自动布线 / draw pcb / place components / generate pcb layout / run pcb placement / route pcb.
+description: >-
+  KiCad PCB component-placement expert (Phase 4) — an AI toolbox plus an agentic placement loop,
+  not a one-shot pipeline. ALWAYS invoke this skill when placing components into a .kicad_pcb from
+  a frozen schematic + project CLAUDE.md, doing HV/LV/ISO region partitioning, isolation-barrier
+  placement, or GND copper pour. Do not string-concatenate .kicad_pcb, place before reading
+  placement_brief, default rot=0 on isolation/polarized parts, or treat check_placement's score as
+  an objective to minimize. Use this skill first. Optional Phase E auto-routes via the vendored
+  KiCadRoutingTools (KRT). Deep review (analyzer / EMC / thermal / cross-ref) belongs to check-pcb.
+  Triggers: 画 PCB / PCB 布局 / 摆元件到 PCB / 区域分区 / 隔离屏障 / GND zone / 自动布局 / 自动布线 /
+  draw pcb / place components / generate pcb layout / run pcb placement / route pcb.
 routes-exempt: scripts/vendor/**
 ---
 
@@ -31,27 +40,32 @@ sch 没画好 → `draw-schematic`;深度审图 / EMC / thermal / cross-ref → 
 
 | 工具 | 干什么 |
 |---|---|
-| `init_pcb` | sch → 空 `.kicad_pcb`(底层 `scripts/sch_to_pcb.py`) |
+| `init_pcb` | sch → 空 `.kicad_pcb` |
+| `check_chirality` | 手性闸门:双排蛇形 IC 顺时针=库镜像(群体判据) |
 | `placement_brief` | 抽电路事实:域 / barrier 器件 + pad→net / cap-IC 链接 / chains / net-pad |
-| `init_layout` | 确定性区域初始解,当种子(底层 `scripts/place_components.py`) |
-| `get_geometry` | 每件 ref / center / courtyard bbox / pad / net |
-| `move` | 移动 / 旋转元件到目标(target = body-bbox 中心) |
+| `init_layout` | 确定性区域初始解,当种子 |
+| `get_geometry` | 每件 ref/center/courtyard bbox/pad/net |
+| `move` | 移动/旋转(target = body-bbox 中心) |
 | `check_placement` | 合法性闸门:重叠 / 间距 / 越界 / 穿屏障 → `hard_fail` |
-| `render` | 标注 PNG(courtyard / 重叠红框 / 隔离屏障线 / 飞线) |
-| `refit_board` | 把 Edge.Cuts + 隔离槽缩到元件实际范围 + margin;返回 `fill_ratio` 紧凑度 |
+| `render` | 标注 PNG(courtyard/重叠/屏障线/飞线) |
+| `refit_board` | Edge.Cuts + 槽缩到元件范围;`fill_ratio`。锁框用 `--keep-outline` |
 | `bridge_slot` | 隔离槽在跨槽 barrier 器件下留实体桥(元件摆定 + refit 后跑) |
 | `add_zones` | GND 铺铜;按 `(net,layer)` 分别调,幂等 |
-| `check_zones` | **验铜没跨隔离屏障**——铜跨槽同网,DRC 报不出来,唯一防线 |
+| `check_zones` | **验铜没跨隔离屏障**——铜跨槽同网 DRC 报不出,唯一防线 |
+| `stitch_zones` · `set_silk_spec` | 缝合过孔(铺铜后)/ 丝印字高线宽 |
+| `set_design_rules` | fab 规则写进 `.kicad_pro`(DRC 只认这) |
 | `run_drc` | kicad-cli DRC,几何裁判 |
-| `route` | 自动布线(底层 vendored KiCadRoutingTools);产出 `_routed.kicad_pcb` |
+| `route` | 自动布线(vendored KRT)→ `_routed.kicad_pcb` |
+| `net_metrics` | 每网长度 / 过孔 / 线宽 / 差分对 delta,**唯一量具** |
 
 参数 + 输出 schema → `references/tools.md`
 
 ## 布局回路(A→D,**每步必打印可见输出**)
 
 ```
-A 理解电路   init_pcb → placement_brief → 读项目 CLAUDE.md 的 placement 意图
-   打印:域划分 / barrier 器件 / 去耦对 / chains —— 不打印不算做过
+A 理解电路   init_pcb → check_chirality(镜像=停,先修库)→ placement_brief
+   → 读项目 CLAUDE.md 的 placement 意图
+   打印:手性回执 / 域划分 / barrier 器件 / 去耦对 / chains —— 不打印不算做过
 B 按电路布局  init_layout 出种子 → AI 按 brief 摆:去耦贴 IC、回路收紧、
    隔离器件按引脚定向、chain 按序 → move 落子
    打印:这一轮移了哪些件 + 每个为什么
@@ -90,20 +104,19 @@ courtyard 复核 / fill_ratio / 终图三域+链序)——**清单全文 + 各�
 ## 前置依赖
 
 KiCad 10 + `kicad-cli` + bundled `pcbnew` Python + 工作区 `.venv`;`draw-schematic` ERC pass。
-`.bom_readiness.json` gate 在上游 `draw-schematic` 已挡,本 skill 不复查。
-Phase E 需 KRT 的 Rust 模块已编译(`build_router.py`,一次性,需 `cargo`;**缺 cargo 报给用户,别自己装**)。
-下游:`check-pcb`(深度检查)→ `release`(出货)。
+`.bom_readiness.json` gate 上游 `draw-schematic` 已挡,不复查。
+Phase E 需 KRT Rust 模块已编译(`build_router.py`,需 `cargo`;**缺 cargo 报用户,别自己装**)。
+下游:`check-pcb`(深度检查)→ `release`。
 
 ## 红线
 
-- ❌ 字符串拼接 `.kicad_pcb` / `.kicad_mod`——一律走工具(底层 `_kicad_python_helper.py` 的 mode)
+- ❌ 字符串拼接 `.kicad_pcb` / `.kicad_mod`——一律走工具(`_kicad_python_helper.py` 的 mode)
 - ❌ 不跑 `placement_brief` 就摆——等于盲摆,回路 / 隔离 / 引脚全靠猜
-- ❌ 连接器 / 开关摆板内——J* / SW* 必须贴板边(`placement_brief` 的 `edge_devices`),否则线缆够不着
-- ❌ `score=100` 就报完成——合法 ≠ 好;**必须 Read 渲染图**做视觉判断 + 对照 brief 看回路
-- ❌ 回路外单独 move / rotate 完直接报完成——必重跑 `check_placement`(带全 flag) + `render` 看图;
-  板上**已有铜 / 桥**时还要重跑 `refit_board → bridge_slot → add_zones → check_zones → run_drc`,
-  否则桥留在旧位置、铜绕的是旧 courtyard
-- ❌ Edge.Cuts 多闭合环 / passive silk 印 MPN → `references/known_issues.md`
+- ❌ 连接器 / 开关摆板内——必须贴板边(`placement_brief` 的 `edge_devices`),否则线缆够不着
+- ❌ `score=100` 就报完成——合法 ≠ 好,**必须 Read 渲染图**对照 brief 看回路;
+  但**图只发现问题、不宣布通过**,判过要量对账,视角要看得见待验物
+- ❌ 回路外单独 move / rotate 完直接报完成——重跑清单见 `loop.md`
+- ❌ Edge.Cuts 多闭合环 / passive silk 印 MPN / pad 旋转几何 → `known_issues.md`
 
 ## references(何时读 → 读哪份)
 

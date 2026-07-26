@@ -431,8 +431,10 @@ def section_thermal(thermal_data: dict | None) -> str:
         return None
 
     summary = thermal_data.get('summary', {})
+    _ts = summary.get('thermal_score', '—')
+    _ts_txt = "NOT ASSESSED" if _ts is None else f"{_ts}/100"
     lines.append(_auto("thermal_summary",
-                       f"**Thermal Score:** {summary.get('thermal_score', '—')}/100 | "
+                       f"**Thermal Score:** {_ts_txt} | "
                        f"**Hottest Component:** {summary.get('hottest_component', '—')} | "
                        f"**Components >85°C:** {summary.get('components_above_85c', 0)}"))
     lines.append("")
@@ -923,7 +925,8 @@ def section_review_summary(analysis: dict, emc_data: dict | None,
     if thermal_data:
         summary = thermal_data.get('summary', {})
         score = summary.get('thermal_score', '—')
-        rows.append(['Thermal Score', f"{score}/100",
+        rows.append(['Thermal Score',
+                     "NOT ASSESSED" if score is None else f"{score}/100",
                      f"{summary.get('components_above_85c', 0)} above 85°C"])
 
     # BOM completeness

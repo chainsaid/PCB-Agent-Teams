@@ -306,16 +306,72 @@ def _call_helper(spec: Dict, timeout: int = 60) -> Dict:
 
 # Main entry ---------------------------------------------------------------
 
+def _translate_floorplan(fp, dx: float, dy: float):
+    """Move a floorplan planned at the origin onto a board that starts
+    elsewhere — a fixed outline rarely has its corner at (0,0)."""
+    from .floorplan import Floorplan, Rect, Slot
+    return Floorplan(
+        board=Rect(fp.board.x + dx, fp.board.y + dy, fp.board.w, fp.board.h),
+        regions={r: Rect(v.x + dx, v.y + dy, v.w, v.h)
+                 for r, v in fp.regions.items()},
+        slots=[Slot(x_mm=s.x_mm + dx, y_start=s.y_start + dy,
+                    y_end=s.y_end + dy, width_mm=s.width_mm, reason=s.reason)
+               for s in fp.slots],
+        edge_cuts=[(a + dx, b + dy, c + dx, d + dy)
+                   for (a, b, c, d) in fp.edge_cuts],
+    )
+
+
+def _existing_outline(pcb_path: Path):
+    """Bbox of the Edge.Cuts already on the board, or None. Text parse — the
+    seed step must not need pcbnew."""
+    import re
+    txt = Path(pcb_path).read_text(encoding="utf-8", errors="replace")
+    xs, ys = [], []
+    for m in re.finditer(r'\(gr_(?:line|rect)\s', txt):
+        seg = txt[m.start():m.start() + 400]
+        if '"Edge.Cuts"' not in seg and "Edge.Cuts" not in seg:
+            continue
+        for key in ("start", "end"):
+            pm = re.search(rf'\({key} ([-\d.]+) ([-\d.]+)\)', seg)
+            if pm:
+                xs.append(float(pm.group(1)))
+                ys.append(float(pm.group(2)))
+    if len(xs) < 2:
+        return None
+    return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)
+
+
 def run_placement_v2(pcb_path: Path,
                      claude_md: Optional[Path] = None,
                      output_pcb: Optional[Path] = None,
                      seed: int = 42,
-                     verbose: bool = True) -> Dict:
-    """Run the full v2 pipeline. Returns a result dict with diagnostics."""
+                     verbose: bool = True,
+                     keep_outline: bool = False) -> Dict:
+    """Run the full v2 pipeline. Returns a result dict with diagnostics.
+
+    keep_outline: fit the placement INSIDE the Edge.Cuts already on the board
+    instead of sizing a fresh outline from pack_density. Use it whenever the
+    outline is fixed by something outside this skill — an enclosure, a chassis,
+    a customer spec — because the default path deletes and redraws Edge.Cuts.
+    """
     pcb_path = Path(pcb_path)
     cfg = parse_claude_md_placement(claude_md)
     if verbose:
         print(f"[v2] Project hints: {list(cfg.keys()) or '(none)'}")
+
+    fixed_outline = None
+    if keep_outline:
+        fixed_outline = _existing_outline(pcb_path)
+        if fixed_outline is None:
+            return {"ok": False,
+                    "error": "keep_outline: no Edge.Cuts found on the board — "
+                             "nothing to preserve. Drop keep_outline to let "
+                             "the floorplan size an outline."}
+        if verbose:
+            print(f"[v2] Keeping existing outline: "
+                  f"{fixed_outline[2]:.1f}×{fixed_outline[3]:.1f}mm "
+                  f"at ({fixed_outline[0]:.1f},{fixed_outline[1]:.1f})")
 
     fp_nets, fp_values, fp_sizes = extract_pcb_data(pcb_path)
     if verbose:
@@ -347,12 +403,29 @@ def run_placement_v2(pcb_path: Path,
         pack_density=float(cfg.get("pack_density", 0.55)),
         board_margin=float(cfg.get("board_margin", 2.5)),
         region_order=cfg.get("region_order"),
-        min_w=cfg.get("board_min_w"),
-        min_h=cfg.get("board_min_h"),
+        # A fixed outline is both the floor and the ceiling: min_w/min_h make
+        # the regions fill it instead of leaving the parts huddled in a corner.
+        min_w=fixed_outline[2] if fixed_outline else cfg.get("board_min_w"),
+        min_h=fixed_outline[3] if fixed_outline else cfg.get("board_min_h"),
     )
+    outline_overflow = None
+    if fixed_outline:
+        bx, by, bw, bh = fixed_outline
+        if fp.board.w > bw + 0.01 or fp.board.h > bh + 0.01:
+            # Regions need more room than the outline allows. Say so loudly —
+            # laying out anyway would push parts past the board edge.
+            outline_overflow = {
+                "needed_mm": [round(fp.board.w, 2), round(fp.board.h, 2)],
+                "available_mm": [round(bw, 2), round(bh, 2)],
+            }
+        fp = _translate_floorplan(fp, bx, by)
     if verbose:
         print(f"[v2] Phase B floorplan: board={fp.board.w:.1f}×{fp.board.h:.1f}mm "
               f"slots={len(fp.slots)}")
+        if outline_overflow:
+            print(f"[v2] ⚠ regions need {outline_overflow['needed_mm']}mm but "
+                  f"the fixed outline is {outline_overflow['available_mm']}mm — "
+                  f"parts will not all fit inside it")
 
     # ----- Phase C: deterministic region layout (no SA) -----
     chains_cfg = cfg.get("chains") or []
@@ -441,6 +514,7 @@ def run_placement_v2(pcb_path: Path,
         # in a fresh helper process — keep apply_layout's inline sweep skipped
         # to avoid the macOS SWIG 'SwigPyObject has no Pads' regression.
         "skip_pad_resolve": True,
+        "keep_outline": bool(fixed_outline),
         "output_pcb": str(output_pcb or pcb_path),
     }
     applied = _call_helper(apply_spec)
@@ -454,7 +528,9 @@ def run_placement_v2(pcb_path: Path,
         "ok": applied.get("ok", False),
         "phase_a": {"region_histogram": region_hist,
                     "diagnostics": diag},
-        "phase_b": {"floorplan": fp.to_dict()},
+        "phase_b": {"floorplan": fp.to_dict(),
+                    "outline_kept": bool(fixed_outline),
+                    "outline_overflow": outline_overflow},
         "phase_c": {"region_counts": region_counts,
                     "placements": {r: list(p) for r, p in placements.items()}},
         "phase_d": applied,
@@ -469,6 +545,8 @@ def main():
     p.add_argument("--output")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--keep-outline", action="store_true",
+                   help="fit inside the board's existing Edge.Cuts")
     args = p.parse_args()
 
     out = run_placement_v2(
@@ -477,11 +555,17 @@ def main():
         output_pcb=Path(args.output) if args.output else None,
         seed=args.seed,
         verbose=not args.quiet,
+        keep_outline=args.keep_outline,
     )
+    if "phase_b" not in out:
+        print(json.dumps(out, indent=2, ensure_ascii=False))
+        sys.exit(1)
     print()
     print(json.dumps({"ok": out["ok"], "summary": {
         "phase_a": out["phase_a"]["region_histogram"],
         "phase_b_board": out["phase_b"]["floorplan"]["board"],
+        "phase_b_outline_kept": out["phase_b"].get("outline_kept"),
+        "phase_b_outline_overflow": out["phase_b"].get("outline_overflow"),
         "phase_b_slots": len(out["phase_b"]["floorplan"]["slots"]),
         "phase_c_counts": out["phase_c"]["region_counts"],
         "phase_d_ok": out["phase_d"].get("ok"),

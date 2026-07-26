@@ -223,8 +223,8 @@ class CopperPresence:
             if layer:
                 self._tracks_by_layer.setdefault(layer, []).append(seg)
 
-        # Index pads by layer -- use absolute position (abs_x, abs_y)
-        # and size (width, height) from extract_footprints() output
+        # Index pads by layer -- absolute position (abs_x, abs_y) and
+        # board-space extent (bbox_w/bbox_h) from extract_footprints()
         self._pads_by_layer = {}
         for fp in footprints or []:
             for pad in fp.get('pads') or []:
@@ -233,8 +233,8 @@ class CopperPresence:
                 py_val = pad.get('abs_y')
                 if px is None or py_val is None:
                     continue
-                pw = pad.get('width', 0)
-                ph = pad.get('height', 0)
+                pw = pad.get('bbox_w', pad.get('width', 0))
+                ph = pad.get('bbox_h', pad.get('height', 0))
                 for lyr in layers:
                     self._pads_by_layer.setdefault(lyr, []).append(
                         (px, py_val, pw, ph))
@@ -594,10 +594,45 @@ def _build_net_mapping(footprints: list[dict], tracks: dict, vias: dict,
     return net_names
 
 
+def rotated_pad_extent(shape: str, w: float, h: float,
+                       angle_deg: float) -> tuple[float, float]:
+    """Axis-aligned board-space extent of a pad rotated by *angle_deg*.
+
+    `size` in the file is always the unrotated library dimension, so a pad on a
+    90°-rotated footprint measures h wide by w high on the board. Feed this the
+    pad's ABSOLUTE angle — pcbnew folds the footprint rotation into every pad
+    orientation when it saves, so the pad's own `(at x y angle)` already carries
+    it and adding the footprint angle double-counts (see
+    draw-pcb/references/known_issues.md).
+
+    Circles are rotation-invariant. An oval is a segment swept by a circle, so
+    only its straight part rotates. Everything else takes the rectangle
+    bounding box — an over-estimate for roundrect corners, which is the safe
+    direction for a clearance gate.
+    """
+    if not angle_deg or w <= 0 or h <= 0 or shape == "circle":
+        return w, h
+    a = math.radians(angle_deg)
+    ca, sa = abs(math.cos(a)), abs(math.sin(a))
+    if shape == "oval":
+        d = min(w, h)
+        if w >= h:
+            return (w - d) * ca + d, (w - d) * sa + d
+        return (h - d) * sa + d, (h - d) * ca + d
+    return w * ca + h * sa, w * sa + h * ca
+
+
 def extract_footprints(root: list) -> list[dict]:
     """Extract all placed footprints with pad details.
 
     Handles both KiCad 6+ (footprint ...) and KiCad 5 (module ...) formats.
+
+    Per pad, `width`/`height` stay the library (unrotated) copper dimensions —
+    area and pitch reasoning wants those — and `bbox_w`/`bbox_h` carry the
+    board-space axis-aligned extent of copper ∪ hole, matching pcbnew's own
+    PAD::GetBoundingBox. Anything comparing pad geometry against board
+    coordinates (clearance, containment, overlap) must use the bbox fields, or
+    every rotated footprint is measured on the wrong axis.
     """
     # EQ-060: x'=x·cosθ-y·sinθ, y'=x·sinθ+y·cosθ (2D rotation)
     footprints = []
@@ -688,8 +723,10 @@ def extract_footprints(root: list) -> list[dict]:
                 "shape": pad_shape,
             }
 
+            pad_angle = 0.0
             if pad_at:
-                # Pad position is relative to footprint; compute absolute
+                # Position is footprint-relative and unrotated; the angle is
+                # already absolute (pcbnew writes GetOrientation()).
                 px, py = pad_at[0], pad_at[1]
                 pad_angle = pad_at[2]
                 # KiCad PCB footprint rotations are clockwise in board coords.
@@ -722,6 +759,22 @@ def extract_footprints(root: list) -> list[dict]:
                         pad_info["drill"] = float(drill_val)
                     except (ValueError, TypeError):
                         pass  # skip malformed drill entries
+
+            if "width" in pad_info:
+                bw, bh = rotated_pad_extent(pad_shape, pad_info["width"],
+                                            pad_info["height"], pad_angle)
+                # A hole is an obstruction even where it pokes out past its own
+                # annular ring — some library pads carry an oval drill wider
+                # than the copper, and pcbnew's own bbox unions the two.
+                if pad_info.get("drill"):
+                    dw = pad_info["drill"]
+                    dh = pad_info.get("drill_h", dw)
+                    dshape = "oval" if pad_info.get("drill_shape") == "oval" \
+                        else "circle"
+                    dbw, dbh = rotated_pad_extent(dshape, dw, dh, pad_angle)
+                    bw, bh = max(bw, dbw), max(bh, dbh)
+                pad_info["bbox_w"] = round(bw, 4)
+                pad_info["bbox_h"] = round(bh, 4)
 
             if pad_net and len(pad_net) >= 3:
                 # KiCad ≤9: (net number "name")
@@ -2880,8 +2933,8 @@ def analyze_vias(vias: dict, footprints: list[dict],
                 continue
             ax = pad.get("abs_x")
             ay = pad.get("abs_y")
-            pw = pad.get("width", 0)
-            ph = pad.get("height", 0)
+            pw = pad.get("bbox_w", pad.get("width", 0))
+            ph = pad.get("bbox_h", pad.get("height", 0))
             if ax is None or ay is None or pw <= 0 or ph <= 0:
                 continue
             pad_boxes.append({
@@ -4873,13 +4926,12 @@ def analyze_thermal_pad_vias(footprints: list[dict], vias: dict,
             net_num = pad.get("net_number", -1)
 
             # Count vias within the thermal pad area
-            # Account for footprint + pad rotation: the pad's width/height are
-            # in the footprint's local coordinate frame, but the via positions
-            # are in board space.  Rotate the via-to-pad offset back into the
-            # pad's local frame for the rectangular containment check.
-            fp_angle = fp.get("angle", 0)
-            pad_angle = pad.get("angle", 0)
-            total_angle = fp_angle + pad_angle
+            # The pad's width/height are in the pad's own frame but via
+            # positions are in board space, so rotate the via-to-pad offset
+            # back into the pad frame for the rectangular containment check.
+            # The pad angle is already absolute (it carries the footprint
+            # rotation) — adding fp["angle"] here rotated 90° parts by 180°.
+            total_angle = pad.get("angle", 0)
             total_rad = math.radians(-total_angle) if total_angle != 0 else 0.0
             cos_a = math.cos(total_rad) if total_angle != 0 else 1.0
             sin_a = math.sin(total_rad) if total_angle != 0 else 0.0
@@ -5111,7 +5163,9 @@ def analyze_thermal_pad_vias(footprints: list[dict], vias: dict,
             entry["pins"] = []
             rec = []
             if adequacy in ("none", "insufficient"):
-                rec.append(f"Add thermal vias under {ref} (need {recommended_min}, have {strict_via_count}).")
+                rec.append(f"Add thermal vias under {ref} (need {recommended_min}, have {strict_via_count}). "
+                           f"draw-pcb's stitch_zones --thermal-pad-vias places them "
+                           f"inside pads on a poured net.")
             if entry.get("tenting_note"):
                 rec.append(entry["tenting_note"])
             entry["recommendation"] = " ".join(rec)
@@ -5783,8 +5837,8 @@ def analyze_silkscreen_pad_overlaps(footprints: list[dict], board_texts: list[di
             py = pad.get("abs_y")
             if px is None or py is None:
                 continue
-            hw = pad.get("width", 0) / 2
-            hh = pad.get("height", 0) / 2
+            hw = pad.get("bbox_w", pad.get("width", 0)) / 2
+            hh = pad.get("bbox_h", pad.get("height", 0)) / 2
             if hw <= 0 or hh <= 0:
                 continue
             layers = pad.get("layers", [])
@@ -5875,8 +5929,8 @@ def analyze_via_in_pad(footprints: list[dict], vias: dict, thermal_pad_refs: set
             py = pad.get("abs_y")
             if px is None or py is None:
                 continue
-            hw = pad.get("width", 0) / 2
-            hh = pad.get("height", 0) / 2
+            hw = pad.get("bbox_w", pad.get("width", 0)) / 2
+            hh = pad.get("bbox_h", pad.get("height", 0)) / 2
             if hw <= 0 or hh <= 0:
                 continue
             pad_num = pad.get("number", "?")

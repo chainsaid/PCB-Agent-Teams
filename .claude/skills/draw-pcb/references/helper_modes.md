@@ -14,14 +14,16 @@
 | `classify_fps` | .kicad_pcb | 只读，返回 `{ref: {zone, is_connector, connector_type}}` |
 | `check_slot_clearance` | .kicad_pcb (auto_fix=True) | (1) 自动给跨槽 ISO IC 选朝向——试 0/90/180/270° 四个绝对角（绕 body center 旋转再回中，不动板框/隔离槽），选**让 HV/LV pad 到屏障的最小距离最大化**且两组都在正确侧的那个角；都在正确侧时按角度差小优先（确定性）。返回 `iso_rotations[]`，每项带 `barrier_margin_mm`。(2) 自动把 pad 落进 slot 的 footprint 推到正确侧 |
 | `ensure_pads_in_board` | .kicad_pcb + margin_mm | 任何 pad/body 落到 Edge.Cuts 外的元件滑回板内 |
-| `add_ground_zones` | .kicad_pcb + keywords + layers | 给每个 GND-like net 加 zone，**先按 (net,layer) 去重清掉已有 zone**，HV_GND clip 到 slot 左半多边形、LV_GND clip 到 slot 右半多边形、其它 GND 全板矩形；不同 net 不同 priority；支持 `fill_now=True` 跑 ZONE_FILLER。绕过 kct zones batch 的 net 解析 bug |
+| `add_ground_zones` | .kicad_pcb + keywords + layers + `pad_connect` | 给每个 GND-like net 加 zone，**先按 (net,layer) 去重清掉已有 zone**，HV_GND clip 到 slot 左半多边形、LV_GND clip 到 slot 右半多边形、其它 GND 全板矩形；不同 net 不同 priority；支持 `fill_now=True` 跑 ZONE_FILLER。`pad_connect` = `thermal`(默认花焊盘) / `solid`(实心连接,写出 `(connect_pads yes)`) / `none`。绕过 kct zones batch 的 net 解析 bug |
 | `validate_zones` | .kicad_pcb (只读) | 校验**没有铜 zone 跨隔离屏障**：检测单条竖直隔离槽 `[left,right]`，对每个已填充 zone 取**填充铜**的 X 跨度，若同一 zone 既有铜在 `x<left` 又有铜在 `x>right` → 跨屏障 → `verdict="fail"` + `crossings[]`。net/电压/网名无关。无槽时 `slot_detected=False` 跳过（不误判）。横向/多段屏障未覆盖 |
 
 | `move_footprints` | .kicad_pcb + `{ref: [x,y,rot]}` | 按 body-bbox center 移动 / 旋转指定 footprint,不碰 Edge.Cuts / 走线 / zone。`move` 工具的底层 |
 | `bridge_slots` | .kicad_pcb + barrier 器件 | 重画隔离槽,在每个跨槽 barrier 器件下方留实体桥。`bridge_slot` 工具的底层 |
-| `refit_board` | .kicad_pcb + margin | Edge.Cuts 外框 + 隔离槽缩到 footprint 实际范围 + margin,返回 `fill_ratio`。`refit_board` 工具的底层 |
+| `refit_board` | .kicad_pcb + margin + `keep_outline` | Edge.Cuts 外框 + 隔离槽缩到 footprint 实际范围 + margin,返回 `fill_ratio`。`keep_outline: true` → 完全不写文件,只按现有板框回报 `fill_ratio`。`refit_board` 工具的底层 |
+| `stitch_zones` | .kicad_pcb + net + 两个层 + pitch | 在**两面填充铜各自内缩(过孔半径+间距)后的交集**内按栅格打过孔,把该网两面缝通;孔另立「孔到孔间距」判据(只判铜会撞进 THT 焊盘的钻孔)。可选往本网大贴片焊盘内打散热孔。**一次一个网**——自动匹配所有 GND 会缝穿隔离屏障。`stitch_zones` 工具的底层 |
+| `set_silk_spec` | .kicad_pcb + 字高 / 线宽 | 全板丝印文字统一到 fab 规格,位号放到所在面丝印层,Value 默认不动。**副作用是预期的**:动过的件与库不一致 → `lib_footprint_issues`;字变大 → `silk_overlap` 涨。`set_silk_spec` 工具的底层 |
 
-> 上表 11 个就是 `MODES` 全集(与 `_kicad_python_helper.py` 末尾的 dispatch 表一一对应)。
+> 上表 13 个就是 `MODES` 全集(与 `_kicad_python_helper.py` 末尾的 dispatch 表一一对应)。
 > 加 mode 必须同步这张表,否则「改脚本 → 读 helper_modes.md」这条路由会漏掉新能力。
 
 ## Spec 字段约定
@@ -67,3 +69,6 @@
 | `PCB_VIA::GetWidth()` 在 KiCad 10 必须带 layer 参数，不带就 abort 进程（rc=139 SIGSEGV） | C++ API 改了，没 layer 就 wxASSERT | helper 改用 `via.GetWidth(f_cu)`，try/except fall back 到 `GetDrill()/2 + 0.15` |
 | `board.Remove()` 后再 iterate `board.GetFootprints()` 返回 SwigPyObject（崩 `AttributeError: ... no attribute 'Pads'`）| macOS pcbnew 10 SWIG 绑定不稳 | retract 类 mode 必须先一次性快照所有 pad + track 元数据再 Remove，绝不迭代 → Remove → 再迭代 |
 | Helper subprocess stdout 被 wx debug 吞掉，pipeline parser 读不到 JSON | macOS wxApp 在某些 LoadBoard/SaveBoard 路径里抢 stdout | helper main() 同时 print 到 stdout + stderr；pipeline `_call_helper_mode` 在两个 stream 里都搜 `{`-prefix line |
+| **反方向的同一个坑**：pcbnew 把 `swig/python detected a memory leak of type 'PCB_TRACK *'` 这类告警**打到 stdout**，混在 JSON 后面 | SWIG 绑定在 `board.Remove()` 之后吐 leak 报告，走的是 stdout 不是 stderr | 别用 `lines[-1]` 取 JSON。`placement_v2/orchestrator.py` 取**第一个能解析成 JSON 的行**；`tools/_kicad.py` 取最后一个 `{`-开头行（helper 双写 stdout+stderr 时成立）。新写 mode 照抄其中一种，别自己发明 |
+| `zone.GetFilledPolysList(layer).Clone()` 出来的对象一调 `Deflate` 就 `AttributeError: 'SHAPE' object has no attribute 'Deflate'` | `.Clone()` 返回基类 `SHAPE`，把 `SHAPE_POLY_SET` 的 `Deflate` / `BooleanAdd` / `Contains` 全丢了 | 用**拷贝构造**：`pcbnew.SHAPE_POLY_SET(zone.GetFilledPolysList(layer))`（`mode_stitch_zones` 里就是这么写的） |
+| 删元素的 mode「看起来跑过其实没跑」，而且 stderr 被 leak 告警刷屏淹没 | 迭代中 `Remove` 让后续 SWIG handle 失效，异常在噪音里看不见 | **凡是要删元素的地方**：开头 `items = [x for x in board.GetTracks()]` 取快照 → 全部判断做完 → 最后统一 `Remove`。判完再删，绝不边迭代边删 |

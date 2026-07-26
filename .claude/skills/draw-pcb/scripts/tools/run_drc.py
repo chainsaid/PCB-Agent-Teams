@@ -9,7 +9,8 @@ to check-pcb.
 Usage:
   run_drc.py <board.kicad_pcb>
 
-Output JSON: {ok, violation_count, unconnected_count, by_type, drc_json}.
+Output JSON: {ok, violation_count, unconnected_count, by_type, drc_json,
+warnings?}.
 """
 import argparse
 import json
@@ -41,6 +42,17 @@ def run_drc(pcb_path: str) -> dict:
     if not cli:
         return {"ok": False, "error": "kicad-cli not found"}
 
+    # kicad-cli resolves design rules by board filename. With no same-named
+    # project file it uses KiCad DEFAULTS without saying so, and every
+    # violation is then measured against rules this board never had.
+    warnings: list[str] = []
+    pro = Path(pcb_path).with_suffix(".kicad_pro")
+    if not pro.exists():
+        warnings.append(
+            f"no {pro.name} beside the board — DRC ran on KiCad DEFAULT design "
+            "rules, not this board's. Expect fake drill / annular / clearance "
+            "violations. Copy the project file next to the board and re-run.")
+
     drc_file = Path(pcb_path).with_suffix(".drc.json")
     try:
         subprocess.run([cli, "pcb", "drc", "--format", "json",
@@ -68,13 +80,16 @@ def run_drc(pcb_path: str) -> dict:
         t = x.get("type", "?")
         by_type[t] = by_type.get(t, 0) + 1
 
-    return {
+    result = {
         "ok": True,
         "violation_count": len(violations),
         "unconnected_count": len(unconnected),
         "by_type": by_type,
         "drc_json": str(drc_file),
     }
+    if warnings:
+        result["warnings"] = warnings
+    return result
 
 
 def main() -> int:

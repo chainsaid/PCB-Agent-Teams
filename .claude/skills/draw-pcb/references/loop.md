@@ -26,6 +26,11 @@ A 理解电路 ──→ B 按电路布局 ──→ C 验证迭代 ──┐
 ## Phase A — 理解电路
 
 1. `init_pcb <project>/kicad/<name>` — sch → 空 `.kicad_pcb`(全部元件落在原点)。已存在则跳过。
+1b. `check_chirality <pcb>` — **封装手性闸门,拿到板先跑**(尤其封装来自外部 EDA 转换 /
+   自绘时)。镜像封装 DRC / 布通率 / 网长全绿但贴片装不上,越晚发现返工越大。
+   `MIRRORED_LIBRARY` → 停,修来源库重转,**不摆一个件**;`VERIFY_LISTED` → 逐件对照
+   datasheet 定性,理由打印出来再继续。打印一行回执:
+   `[draw-pcb] A check_chirality verdict=? cw_serpentine=?`
 2. `placement_brief <pcb>` — 拿电路事实 JSON。
 3. Read 项目 `CLAUDE.md` 的 `placement` 段(人工声明的意图:板宽 / 隔离槽 / anchors / decoupling_pairs / chains)。字段表 → `claude_md_constraints.md`。
 4. **合并成布局意图**,并**打印**出来:
@@ -120,7 +125,43 @@ A 理解电路 ──→ B 按电路布局 ──→ C 验证迭代 ──┐
 
 **不要**把 `check_placement` 的 score 当成要最小化的数。score=100 只代表合法。回路紧不紧、好不好看,是你看 brief + PNG 得出的判断。
 
+## 改完要重跑什么(回路外单独 move / rotate 之后)
+
+单独动了元件就**不能直接报完成**,按动了什么补跑:
+
+| 动了什么 | 必须重跑 |
+|---|---|
+| 任何元件位置 / 角度 | `check_placement`(带全 flag)+ `render` |
+| 连接器 / 开关 | 上面两项 **+ `check_connector_access`** |
+| 板上**已有铜 / 桥**时动了任何件 | 上面全部 **+ `refit_board → bridge_slot → add_zones → check_zones → run_drc`** ——不重跑桥会停在旧位置、铜绕的是旧 courtyard |
+
+## 什么算"验过了"(贯穿全回路的铁律)
+
+**渲染图只能用来发现问题,不能用来宣布通过。** 凡是"贴上去看着没问题 / 图上看布通了 /
+参数我传给布线器了"这类判断,都必须换成**可测量的量对账**——坐标 vs 坐标、数值 vs 阈值:
+
+| 想断言的事 | 量它的工具 |
+|---|---|
+| 元件在该在的位置 / 没撞 | `get_geometry` + `check_placement`(硬闸门) |
+| 几何合法 | `run_drc`(最终裁判,用真 footprint 几何) |
+| 网长 / 过孔数 / 线宽 / 差分对等长 | `net_metrics`(**唯一量具**) |
+| 铜没跨隔离屏障 | `check_zones` 退出码 |
+| 连接器插得进 | `check_connector_access` 的 `hard_fail` |
+
+**还要选看得见待验对象的视角**:引脚在板底,只渲顶视等于挑了一个刚好看不到待验物的角度,
+再把"看着没问题"当通过。要验底面的东西就出底视图。
+
+**别把断言写进注释当证据**:"pad pitch 对得上"这种话如果没量过,它就是猜测冒充结论。
+
 ## Phase D — 收尾
+
+> **先看这块板有没有隔离屏障,再决定跑哪几步。** 下面 5 步是**有屏障板**的全序列。
+> **单一 GND、无隔离屏障的板**(绝大多数纯 LV 板)只跑:
+> `refit_board → add_zones → run_drc`。第 2 步 `bridge_slot` 与第 3b 步 `check_zones`
+> **按定义不适用**——没有槽就没有桥可留,`check_zones` 也没有屏障可验(它会直接 `skipped`)。
+> 那不是漏了步骤。**板框由外部给定**(外壳 / 机箱 / 客户规格)时第 1 步换成
+> `refit_board --keep-outline`(只量 `fill_ratio`,一个字节都不写)。
+> **布完线**(Phase E)还要补一步 `stitch_zones` 把两面地缝起来,见 `routing.md`。
 
 1. `refit_board <pcb>` — 把 Edge.Cuts + 隔离槽缩到元件实际范围 + margin。板框尺寸是
    `init_layout` 按 CLAUDE.md `pack_density` 一次性定的;回路把元件收紧后板框就偏大,
@@ -159,7 +200,9 @@ A 理解电路 ──→ B 按电路布局 ──→ C 验证迭代 ──┐
    这些件 `placement_brief` 会标 `geometry_uncertain`,courtyard 退化时 pad-bbox 远小于实体,
    靠它判间距会假阴性(看着没撞、实际撞);Phase D 的 `run_drc` 用真 footprint 几何兜底。
 7. **紧凑度**:Phase D 跑 `refit_board` 让板框缩到元件实际范围;看 `fill_ratio`
-   (courtyard 面积 / 板面积)+ 终图。
+   (footprint bbox 总面积 / 板面积,不含文字)+ 终图。
+   **板框外部给定时**(外壳 / 机箱 / 客户规格锁死尺寸):跑 `refit_board --keep-outline`,
+   它不动 Edge.Cuts、只回报 `fill_ratio`。**别跑默认档**——那会把给定板框删掉重画。
    **达标线(缺项目声明时用这个,别凭感觉)**:混合板(有 THT 连接器)`fill_ratio ≥ 0.18`,
    纯 SMD 板 `≥ 0.30`。低于线 → 回 B 收紧再 refit,**不是**直接判 pass。
    两轮 refit 后仍不达标但终图看不出大空洞 → 记为"已知不达标 + 理由"交用户,别硬刷。

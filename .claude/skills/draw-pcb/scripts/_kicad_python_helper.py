@@ -150,6 +150,10 @@ def mode_create_pcb(spec):
     # block we just wrote). Without this, hand-routed 0.2mm tracks may trip
     # `track_width` violations against an old min_track_width=0.25 from a
     # stale project file.
+    # These are only permissive STARTING values so a fresh board is not
+    # blocked by a stale project file. To hold the board to a fab's actual
+    # spec, run tools/set_design_rules.py — it parameterises every rule here
+    # plus netclasses, and echoes back what took effect.
     pro_path = Path(output_pcb).with_suffix(".kicad_pro")
     if pro_path.exists():
         try:
@@ -290,14 +294,19 @@ def mode_apply_layout(spec):
             fp.Move(pcbnew.VECTOR2I(int(delta_x), int(delta_y)))
         placed += 1
 
-    # ── Remove existing Edge.Cuts items ──
+    # ── Edge.Cuts ──
+    # A board outline is often NOT ours to choose: an enclosure, a connector
+    # cutout pattern or a customer spec fixes it, and the placement has to fit
+    # inside what already exists. keep_outline leaves Edge.Cuts untouched.
     edge_layer = board.GetLayerID("Edge.Cuts")
-    drawings_to_remove = []
-    for drawing in list(board.GetDrawings()):
-        if drawing.GetLayer() == edge_layer:
-            drawings_to_remove.append(drawing)
-    for d in drawings_to_remove:
-        board.Remove(d)
+    keep_outline = bool(spec.get("keep_outline", False))
+    if not keep_outline:
+        drawings_to_remove = []
+        for drawing in list(board.GetDrawings()):
+            if drawing.GetLayer() == edge_layer:
+                drawings_to_remove.append(drawing)
+        for d in drawings_to_remove:
+            board.Remove(d)
 
     # Track removal is moved to the end (after silk processing) — doing
     # it here invalidates pcbnew SWIG handles for subsequent
@@ -340,27 +349,36 @@ def mode_apply_layout(spec):
         seg.SetWidth(pcbnew.FromMM(0.1))
         board.Add(seg)
 
-    # Outer rectangle (continuous — slot is INTERNAL cutout, not breaking outer edge)
-    add_edge_line(x1, y1, x2, y1)
-    add_edge_line(x2, y1, x2, y2)
-    add_edge_line(x2, y2, x1, y2)
-    add_edge_line(x1, y2, x1, y1)
-
-    # Internal isolation slots — leave generous PCB bridges (3mm) at top + bottom
-    # so HV/LV halves are mechanically rigid AND ISO ICs (AMC1311 SOIC-8W,
-    # IB0505 DIP-4) have continuous board substrate under their bodies.
-    # The slot is a non-conductive gap providing electrical isolation; the bridges
-    # provide mechanical strength and routing-friendly connectivity for ground.
-    bridge = 3.0  # mm — wide enough to be milled reliably and stay rigid
     slot_lines_drawn = 0
-    for slot in slots:
-        sx1 = slot["x1"]
-        sx2 = slot["x2"]
-        add_edge_line(sx1, y1 + bridge, sx2, y1 + bridge)         # slot top
-        add_edge_line(sx2, y1 + bridge, sx2, y2 - bridge)         # slot right wall
-        add_edge_line(sx2, y2 - bridge, sx1, y2 - bridge)         # slot bottom
-        add_edge_line(sx1, y2 - bridge, sx1, y1 + bridge)         # slot left wall
-        slot_lines_drawn += 4
+    if keep_outline:
+        # The existing outline stands, so measure it instead of drawing one —
+        # downstream (pad-conflict sweep) needs the real board bbox.
+        bb = board.GetBoardEdgesBoundingBox()
+        x1 = pcbnew.ToMM(bb.GetX())
+        y1 = pcbnew.ToMM(bb.GetY())
+        x2 = x1 + pcbnew.ToMM(bb.GetWidth())
+        y2 = y1 + pcbnew.ToMM(bb.GetHeight())
+    else:
+        # Outer rectangle (continuous — slot is INTERNAL cutout, not breaking outer edge)
+        add_edge_line(x1, y1, x2, y1)
+        add_edge_line(x2, y1, x2, y2)
+        add_edge_line(x2, y2, x1, y2)
+        add_edge_line(x1, y2, x1, y1)
+
+        # Internal isolation slots — leave generous PCB bridges (3mm) at top + bottom
+        # so HV/LV halves are mechanically rigid AND ISO ICs (AMC1311 SOIC-8W,
+        # IB0505 DIP-4) have continuous board substrate under their bodies.
+        # The slot is a non-conductive gap providing electrical isolation; the bridges
+        # provide mechanical strength and routing-friendly connectivity for ground.
+        bridge = 3.0  # mm — wide enough to be milled reliably and stay rigid
+        for slot in slots:
+            sx1 = slot["x1"]
+            sx2 = slot["x2"]
+            add_edge_line(sx1, y1 + bridge, sx2, y1 + bridge)      # slot top
+            add_edge_line(sx2, y1 + bridge, sx2, y2 - bridge)      # slot right wall
+            add_edge_line(sx2, y2 - bridge, sx1, y2 - bridge)      # slot bottom
+            add_edge_line(sx1, y2 - bridge, sx1, y1 + bridge)      # slot left wall
+            slot_lines_drawn += 4
 
     # ── Pad-pad conflict guard (different-net pads must not overlap) ──
     # Older placement runs occasionally put decoupling caps too close to ISO IC
@@ -1023,6 +1041,8 @@ def mode_add_ground_zones(spec):
         a per-voltage creepage rule — on boards with HV nodes the caller passes
         a rect that keeps the pour off the HV area instead.
       fill_now: bool, run zone filler immediately after add (default True)
+      pad_connect: 'thermal' (default, spoked relief — hand-soldering friendly)
+        | 'solid' (full copper contact, no spokes to starve) | 'none'
     """
     pcb_path = spec["pcb_path"]
     output_pcb = spec.get("output_pcb", pcb_path)
@@ -1031,6 +1051,11 @@ def mode_add_ground_zones(spec):
     layer_names = spec.get("layers", ["B.Cu"])
     if isinstance(layer_names, str):
         layer_names = [layer_names]
+    pad_connect = str(spec.get("pad_connect") or "thermal").lower()
+    if pad_connect not in ("thermal", "solid", "none"):
+        return {"ok": False,
+                "error": f"pad_connect must be thermal|solid|none, got "
+                         f"{pad_connect!r}"}
     clearance_mm = spec.get("clearance_mm", 0.3)
     slot_inset_mm = float(spec.get("slot_inset_mm", 1.5))
     board_inset_mm = float(spec.get("board_inset_mm", 0.5))
@@ -1161,6 +1186,17 @@ def mode_add_ground_zones(spec):
                     zone.SetThermalReliefSpokes(1)
             except Exception:
                 pass
+            # Pad connection: thermal relief (spokes) is the hand-soldering
+            # default, but each spoke needs room — once traces crowd a pad the
+            # remaining spokes get starved and DRC says so. Solid connection
+            # removes that failure mode at the cost of a heat sink on every
+            # pad, which matters for hand rework, not for reflow.
+            if pad_connect == "solid":
+                zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
+            elif pad_connect == "none":
+                zone.SetPadConnection(pcbnew.ZONE_CONNECTION_NONE)
+            else:
+                zone.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
             board.Add(zone)  # without this the ZONE is orphaned — never saved
             zones_added.append({
                 "net": net_name, "code": net_code, "layer": layer_label,
@@ -1190,6 +1226,7 @@ def mode_add_ground_zones(spec):
         "zones_count": len(zones_added),
         "zones_removed": zones_removed,
         "slot_detected": slot is not None,
+        "pad_connect": pad_connect,
         "fill_status": fill_result,
     }
 
@@ -1577,13 +1614,18 @@ def mode_refit_board(spec):
     x — run bridge_slots afterwards to carve device bridges. Run before
     add_zones (zones are sized from Edge.Cuts).
 
-    spec: {pcb_path, output_pcb, margin_mm}
+    With keep_outline the outline is left exactly as found and this becomes a
+    measurement only: fill_ratio against the given board, nothing written. That
+    is the right mode whenever an enclosure or customer spec owns the outline.
+
+    spec: {pcb_path, output_pcb, margin_mm, keep_outline}
     Returns board rect + fill_ratio (courtyard area / board area) so the
     caller can judge compactness.
     """
     pcb_path = spec["pcb_path"]
     output_pcb = spec.get("output_pcb", pcb_path)
     margin = float(spec.get("margin_mm", 2.5))
+    keep_outline = bool(spec.get("keep_outline", False))
 
     board = pcbnew.LoadBoard(pcb_path)
     edge_layer = board.GetLayerID("Edge.Cuts")
@@ -1605,6 +1647,38 @@ def mode_refit_board(spec):
         fp_area += w * h
     if not fxs:
         return {"ok": False, "error": "no footprints to fit"}
+
+    if keep_outline:
+        # Measure the outline from Edge.Cuts endpoints, not
+        # GetBoardEdgesBoundingBox — that one includes the stroke width, which
+        # inflates board area and quietly deflates fill_ratio right where the
+        # metric is compared against a threshold.
+        exs, eys = [], []
+        for d in list(board.GetDrawings()):
+            if d.GetLayer() != edge_layer:
+                continue
+            for pt in (d.GetStart(), d.GetEnd()):
+                exs.append(pcbnew.ToMM(pt.x))
+                eys.append(pcbnew.ToMM(pt.y))
+        if len(exs) < 2:
+            return {"ok": False,
+                    "error": "keep_outline: board has no Edge.Cuts to measure"}
+        bx, by = min(exs), min(eys)
+        bw, bh = max(exs) - bx, max(eys) - by
+        if bw <= 0 or bh <= 0:
+            return {"ok": False,
+                    "error": "keep_outline: Edge.Cuts encloses no area"}
+        area = bw * bh
+        return {
+            "ok": True,
+            "outline_kept": True,
+            "board": {"x": round(bx, 2), "y": round(by, 2),
+                      "w": round(bw, 2), "h": round(bh, 2)},
+            "fill_ratio": round(fp_area / area, 3) if area else None,
+            "placement_extent": {"w": round(max(fxs) - min(fxs), 2),
+                                 "h": round(max(fys) - min(fys), 2)},
+            "wrote_nothing": True,
+        }
 
     x1, y1 = min(fxs) - margin, min(fys) - margin
     x2, y2 = max(fxs) + margin, max(fys) + margin
@@ -1653,8 +1727,284 @@ def mode_refit_board(spec):
     }
 
 
+def mode_stitch_zones(spec):
+    """Tie one net's pours on two layers together with vias.
+
+    Why: on a 2-layer board every track on the back side slices that pour into
+    islands, so the return current under a signal has to keep finding a way
+    across, and a big thermal pad on the front has nothing carrying heat or
+    return current down. Both are the same missing thing — vias where BOTH
+    pours are actually filled.
+
+    A candidate is kept only if it lands inside both FILLED polygons after each
+    is shrunk by (via radius + clearance), so the via can never touch foreign
+    copper: the fill already keeps its own distance from everything not on this
+    net. Copper is not the only rule though — a plated through-hole pad sits
+    inside the pour, so the copper test says yes right on top of its drill.
+    Holes are therefore checked separately against hole-to-hole spacing;
+    judging copper alone lands you in `hole_to_hole` violations.
+
+    ONE net per call, named explicitly. Auto-matching every GND-like net would
+    happily stitch across an isolation barrier and destroy the very separation
+    the barrier exists for.
+
+    spec: {pcb_path, output_pcb, net, layers[2], pitch_mm, via_dia_mm,
+           drill_mm, clearance_mm, min_sep_mm, hole_to_hole_mm,
+           thermal_pad_min_mm2}
+    """
+    pcb_path = spec["pcb_path"]
+    output_pcb = spec.get("output_pcb", pcb_path)
+    net_name = spec.get("net", "GND")
+    layer_names = spec.get("layers") or ["F.Cu", "B.Cu"]
+    if len(layer_names) != 2:
+        return {"ok": False, "error": "stitching needs exactly two layers"}
+    pitch = float(spec.get("pitch_mm", 5.0))
+    via_dia = float(spec.get("via_dia_mm", 0.6))
+    drill = float(spec.get("drill_mm", 0.3))
+    clearance = float(spec.get("clearance_mm", 0.2))
+    min_sep = float(spec.get("min_sep_mm", 2.0))
+    hole_to_hole = float(spec.get("hole_to_hole_mm", 0.5))
+    thermal_min = float(spec.get("thermal_pad_min_mm2", 0.0))
+    if pitch <= 0:
+        return {"ok": False, "error": "pitch_mm must be > 0"}
+
+    board = pcbnew.LoadBoard(pcb_path)
+    lay_ids = []
+    for nm in layer_names:
+        lid = board.GetLayerID(nm)
+        if lid < 0:
+            return {"ok": False, "error": f"unknown layer: {nm}"}
+        lay_ids.append(lid)
+
+    # Fill first: the whole test is "is there copper here", and an unfilled
+    # zone reports none.
+    try:
+        pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    except Exception as e:
+        return {"ok": False, "error": f"zone fill failed: {e}"}
+
+    net_code = None
+    polys = {}
+    for z in board.Zones():
+        if str(z.GetNetname()) != net_name:
+            continue
+        net_code = z.GetNetCode()
+        for lid in lay_ids:
+            if not z.IsOnLayer(lid):
+                continue
+            # Copy-construct: .Clone() returns a bare SHAPE with no Deflate /
+            # BooleanAdd / Contains on it.
+            polys.setdefault(lid, []).append(
+                pcbnew.SHAPE_POLY_SET(z.GetFilledPolysList(lid)))
+    if net_code is None:
+        return {"ok": False,
+                "error": f"no zone on net {net_name!r} — pour it with "
+                         f"add_zones first"}
+    missing = [nm for nm, lid in zip(layer_names, lay_ids) if lid not in polys]
+    if missing:
+        return {"ok": False,
+                "error": f"net {net_name!r} has no filled pour on {missing} — "
+                         f"nothing to stitch to"}
+
+    shrink = pcbnew.FromMM(via_dia / 2 + clearance)
+    safe = {}
+    for lid, lst in polys.items():
+        acc = pcbnew.SHAPE_POLY_SET()
+        for ps in lst:
+            ps.Deflate(shrink, pcbnew.CORNER_STRATEGY_ROUND_ALL_CORNERS,
+                       pcbnew.FromMM(0.01))
+            acc.BooleanAdd(ps)
+        safe[lid] = acc
+
+    existing = [t.GetPosition() for t in list(board.GetTracks())
+                if t.Type() == pcbnew.PCB_VIA_T]
+    sep = pcbnew.FromMM(min_sep)
+
+    holes = []
+    for fp in list(board.GetFootprints()):
+        for pad in fp.Pads():
+            dr = pad.GetDrillSizeX()
+            if dr > 0:
+                holes.append((pad.GetPosition(), dr // 2))
+    hole_margin = pcbnew.FromMM(drill / 2 + hole_to_hole)
+
+    def place(pt):
+        v = pcbnew.PCB_VIA(board)
+        v.SetPosition(pt)
+        v.SetWidth(pcbnew.FromMM(via_dia))
+        v.SetDrill(pcbnew.FromMM(drill))
+        v.SetNetCode(net_code)
+        v.SetLayerPair(lay_ids[0], lay_ids[1])
+        board.Add(v)
+        existing.append(pt)
+
+    def blocked(pt, need_both=True):
+        lids = lay_ids if need_both else lay_ids[1:]
+        if not all(safe[l].Contains(pt) for l in lids):
+            return "no_copper"
+        if any(abs(q.x - pt.x) < sep and abs(q.y - pt.y) < sep
+               for q in existing):
+            return "too_close_to_via"
+        if any((q.x - pt.x) ** 2 + (q.y - pt.y) ** 2 < (r + hole_margin) ** 2
+               for q, r in holes):
+            return "too_close_to_hole"
+        return None
+
+    rejected = {"no_copper": 0, "too_close_to_via": 0, "too_close_to_hole": 0}
+    box = board.GetBoardEdgesBoundingBox()
+    step = pcbnew.FromMM(pitch)
+    added = 0
+    y = box.GetTop() + step // 2
+    while y < box.GetBottom():
+        x = box.GetLeft() + step // 2
+        while x < box.GetRight():
+            pt = pcbnew.VECTOR2I(int(x), int(y))
+            x += step
+            why = blocked(pt)
+            if why:
+                rejected[why] += 1
+                continue
+            place(pt)
+            added += 1
+        y += step
+
+    thermal_added = 0
+    if thermal_min > 0:
+        inset = pcbnew.FromMM(via_dia / 2 + 0.15)
+        grid = pcbnew.FromMM(1.2)
+        for fp in list(board.GetFootprints()):
+            for pad in fp.Pads():
+                # SMD only: a pad that already has a hole is its own via.
+                if pad.GetNetCode() != net_code or pad.GetDrillSizeX() > 0:
+                    continue
+                w, h = pad.GetSizeX(), pad.GetSizeY()
+                if pcbnew.ToMM(w) * pcbnew.ToMM(h) < thermal_min:
+                    continue
+                c = pad.GetPosition()
+                nx = max(1, int((w - 2 * inset) // grid))
+                ny = max(1, int((h - 2 * inset) // grid))
+                for i in range(nx):
+                    for j in range(ny):
+                        px = c.x - (w // 2 - inset) + (
+                            0 if nx == 1 else i * (w - 2 * inset) // (nx - 1))
+                        py = c.y - (h // 2 - inset) + (
+                            0 if ny == 1 else j * (h - 2 * inset) // (ny - 1))
+                        pt = pcbnew.VECTOR2I(int(px), int(py))
+                        # The pad IS the near-side copper, so only the far side
+                        # needs a pour to land on.
+                        why = blocked(pt, need_both=False)
+                        if why:
+                            rejected[why] += 1
+                            continue
+                        place(pt)
+                        thermal_added += 1
+
+    try:
+        pcbnew.ZONE_FILLER(board).Fill(board.Zones())
+    except Exception as e:
+        return {"ok": False, "error": f"re-fill after stitching failed: {e}"}
+    if not pcbnew.SaveBoard(output_pcb, board):
+        return {"ok": False, "error": f"SaveBoard failed: {output_pcb}"}
+
+    return {
+        "ok": True,
+        "output_pcb": output_pcb,
+        "net": net_name,
+        "layers": layer_names,
+        "stitch_vias_added": added,
+        "thermal_pad_vias_added": thermal_added,
+        "candidates_rejected": rejected,
+        "pitch_mm": pitch,
+        "next": "run_drc — stitching adds holes, so hole_to_hole and "
+                "annular_width are the checks that matter now",
+    }
+
+
+def mode_set_silk_spec(spec):
+    """Force silkscreen text to a fab's character spec.
+
+    Fabs state a minimum silk line width and character height (below it the
+    screen print smears or drops out), and KiCad's per-footprint defaults come
+    from whatever library each part came from — so a board mixes several sizes
+    until something normalises them.
+
+    Reference designators are put on the silk layer of the side the part is on.
+    Values are left alone by default: they usually carry an MPN, and printing
+    that on the board buys nothing while crowding out the refdes.
+
+    Two consequences worth knowing before running this:
+      * editing footprint text makes the board differ from its library, so DRC
+        reports `lib_footprint_issues` for every part touched. That finding is
+        expected here and should be triaged as such, not chased.
+      * bigger text overlaps more. Expect `silk_overlap` / `silk_over_copper`
+        to rise; that is a real readability problem to fix by moving text, not
+        a reason to skip the spec.
+
+    spec: {pcb_path, output_pcb, height_mm, thickness_mm, include_values,
+           hide_values}
+    """
+    pcb_path = spec["pcb_path"]
+    output_pcb = spec.get("output_pcb", pcb_path)
+    height = spec.get("height_mm")
+    thickness = spec.get("thickness_mm")
+    include_values = bool(spec.get("include_values", False))
+    hide_values = bool(spec.get("hide_values", False))
+    if height is None and thickness is None and not hide_values:
+        return {"ok": False,
+                "error": "nothing to set — give height_mm and/or thickness_mm"}
+
+    board = pcbnew.LoadBoard(pcb_path)
+    h_iu = pcbnew.FromMM(float(height)) if height is not None else None
+    t_iu = pcbnew.FromMM(float(thickness)) if thickness is not None else None
+
+    def apply(item):
+        if h_iu is not None:
+            item.SetTextSize(pcbnew.VECTOR2I(h_iu, h_iu))
+        if t_iu is not None:
+            item.SetTextThickness(t_iu)
+
+    refs = values = board_texts = 0
+    for fp in list(board.GetFootprints()):
+        back = fp.GetLayer() != pcbnew.F_Cu
+        ref = fp.Reference()
+        ref.SetLayer(pcbnew.B_SilkS if back else pcbnew.F_SilkS)
+        apply(ref)
+        refs += 1
+        val = fp.Value()
+        if hide_values:
+            val.SetVisible(False)
+            values += 1
+        elif include_values:
+            apply(val)
+            values += 1
+
+    for d in list(board.GetDrawings()):
+        if isinstance(d, pcbnew.PCB_TEXT) and d.GetLayer() in (pcbnew.F_SilkS,
+                                                               pcbnew.B_SilkS):
+            apply(d)
+            board_texts += 1
+
+    if not pcbnew.SaveBoard(output_pcb, board):
+        return {"ok": False, "error": f"SaveBoard failed: {output_pcb}"}
+
+    return {
+        "ok": True,
+        "output_pcb": output_pcb,
+        "height_mm": height,
+        "thickness_mm": thickness,
+        "references_set": refs,
+        "values_touched": values,
+        "board_texts_set": board_texts,
+        "expect": "lib_footprint_issues for every part touched (board now "
+                  "differs from library — triage, do not chase), and more "
+                  "silk_overlap as text grows",
+    }
+
+
 MODES = {
     "create_pcb": mode_create_pcb,
+    "stitch_zones": mode_stitch_zones,
+    "set_silk_spec": mode_set_silk_spec,
     "apply_layout": mode_apply_layout,
     "classify_fps": mode_classify_fps,
     "check_slot_clearance": mode_check_slot_clearance,

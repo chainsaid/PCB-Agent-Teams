@@ -10,12 +10,19 @@ extent + margin and redraws the isolation slot continuous at its existing x.
 Run order in Phase D: refit_board -> bridge_slot -> add_zones -> check_zones -> run_drc
 (refit must precede bridge_slot + add_zones — both read Edge.Cuts).
 
-Output JSON includes `fill_ratio` (courtyard area / board area) — the
-compactness metric. A very low fill_ratio means the placement is still too
+Output JSON includes `fill_ratio` — the compactness metric: summed footprint
+bounding box (pads + graphics, text excluded) / board area. NOT courtyard area:
+most library footprints ship no CrtYd graphics at all, so a courtyard-based
+ratio would silently mean "pad area" on those boards and change meaning from
+one library to the next. A very low fill_ratio means the placement is still too
 spread out; tighten it in the loop before refitting.
 
+⚠ This REWRITES Edge.Cuts. When the outline is fixed by something outside this
+skill (enclosure, chassis, customer spec), pass --keep-outline: the outline is
+left alone and the tool only reports fill_ratio against it, writing nothing.
+
 Usage:
-  refit_board.py <board.kicad_pcb> [--margin 2.5]
+  refit_board.py <board.kicad_pcb> [--margin 2.5] [--keep-outline]
 
 Wraps _kicad_python_helper.py's refit_board mode (needs KiCad's pcbnew).
 """
@@ -33,6 +40,10 @@ def main() -> int:
     ap.add_argument("pcb", help="path to .kicad_pcb")
     ap.add_argument("--margin", type=float, default=2.5,
                     help="board edge margin around footprint extent, mm")
+    ap.add_argument("--keep-outline", action="store_true",
+                    help="do NOT touch Edge.Cuts — just report fill_ratio "
+                         "against the outline already on the board. Use when "
+                         "an enclosure / chassis / customer spec owns it.")
     args = ap.parse_args()
 
     if not Path(args.pcb).exists():
@@ -44,6 +55,7 @@ def main() -> int:
         "pcb_path": str(args.pcb),
         "output_pcb": str(args.pcb),
         "margin_mm": args.margin,
+        "keep_outline": args.keep_outline,
     })
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0 if result.get("ok") else 1

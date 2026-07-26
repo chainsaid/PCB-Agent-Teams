@@ -26,9 +26,16 @@ Usage:
            [--track-width MM] [--power-nets NET ... --power-nets-widths MM ...]
            [--ordering {inside_out,mps,original}] [--via-size MM] [--via-drill MM]
            [--clearance MM] [--layers LAYER ...] [--impedance OHM]
+           [--via-cost N] [--via-proximity-cost N] [--layer-costs MULT ...]
+           [--length-match-group PAT ... [--length-match-group PAT ...]]
+           [--length-match-tolerance MM] [--meander-amplitude MM]
 
 Output JSON: {ok, output_pcb, routed_single, multipoint_pads, failed, vias,
-recipe, zones_stripped}.
+recipe, zones_stripped, sidecars_copied}.
+
+Exit code is 1 whenever any net failed to route — but the routed board HAS
+been written by then. Do not chain this with `&&`: a partial route silently
+skips every following step while looking like the run finished.
 
 Copper pours are stripped from the routed copy by default (see --keep-zones);
 re-pour with add_zones.py afterwards, THEN run DRC.
@@ -89,6 +96,33 @@ def main() -> int:
                     help="copper layers to route on (unset → KRT default F.Cu B.Cu)")
     ap.add_argument("--impedance", type=float, metavar="OHM",
                     help="controlled-impedance target for diff / ADC nets")
+    # --- via budget: the router trades vias against detour length ---------
+    ap.add_argument("--via-cost", type=int, metavar="N",
+                    help="A* penalty per via, in grid steps (KRT default 50). "
+                         "Raise it when a net has a via budget — layer changes "
+                         "get expensive so the router detours instead. This is "
+                         "a cost, NOT a hard cap: verify the result with "
+                         "net_metrics.py")
+    ap.add_argument("--via-proximity-cost", type=int, metavar="N",
+                    help="via cost multiplier inside stub / fine-pitch "
+                         "proximity zones (KRT default 10; 0 blocks vias there)")
+    ap.add_argument("--layer-costs", nargs="+", type=float, metavar="MULT",
+                    help="per-layer cost multipliers, positionally paired with "
+                         "--layers. Push traffic onto a preferred layer, e.g. "
+                         "keep a 2-layer board's bottom side mostly plane")
+    # --- length matching (KRT does this; it is not a manual-only step) ----
+    ap.add_argument("--length-match-group", nargs="+", action="append",
+                    metavar="PAT", dest="length_match_groups",
+                    help="net patterns to length-match as one group; repeat "
+                         "the flag for more groups. Meanders are added to the "
+                         "shorter members")
+    ap.add_argument("--length-match-tolerance", type=float, metavar="MM",
+                    help="allowed length spread inside a group, mm "
+                         "(KRT default 0.1)")
+    ap.add_argument("--meander-amplitude", type=float, metavar="MM",
+                    help="meander height perpendicular to the trace, mm "
+                         "(KRT default 1.0). Keep it under the local channel "
+                         "width or the meander collides with neighbours")
     args = ap.parse_args()
 
     src = Path(args.pcb)
@@ -128,12 +162,22 @@ def main() -> int:
                           "--keep-zones if you really mean to route in place."}))
         return 1
 
+    sidecars: list[str] = []
     if args.in_place:
         out = src
     else:
         out = Path(args.output) if args.output else \
             src.with_name(src.stem + "_routed.kicad_pcb")
         shutil.copy2(src, out)
+        # kicad-cli finds design rules by BOARD FILENAME: no same-named
+        # .kicad_pro next to the copy and DRC silently falls back to KiCad
+        # defaults, which manufactures hundreds of fake drill/annular/edge
+        # violations on a board that is actually clean. Carry the rules along.
+        for ext in (".kicad_pro", ".kicad_dru"):
+            s = src.with_suffix(ext)
+            if s.exists():
+                shutil.copy2(s, out.with_suffix(ext))
+                sidecars.append(out.with_suffix(ext).name)
 
     # Strip copper pours before routing. KRT never treats zone copper as an
     # obstacle, but it DOES treat a zone as proof that its net is already
@@ -213,6 +257,18 @@ def main() -> int:
         cmd += ["--layers"] + args.layers
     if args.impedance is not None:
         cmd += ["--impedance", str(args.impedance)]
+    if args.via_cost is not None:
+        cmd += ["--via-cost", str(args.via_cost)]
+    if args.via_proximity_cost is not None:
+        cmd += ["--via-proximity-cost", str(args.via_proximity_cost)]
+    if args.layer_costs:
+        cmd += ["--layer-costs"] + [str(c) for c in args.layer_costs]
+    for grp in (args.length_match_groups or []):
+        cmd += ["--length-match-group"] + list(grp)
+    if args.length_match_tolerance is not None:
+        cmd += ["--length-match-tolerance", str(args.length_match_tolerance)]
+    if args.meander_amplitude is not None:
+        cmd += ["--meander-amplitude", str(args.meander_amplitude)]
 
     # Echo the non-default recipe back so the caller can print what was chosen.
     recipe = {k: v for k, v in {
@@ -225,6 +281,12 @@ def main() -> int:
         "clearance": args.clearance,
         "layers": args.layers,
         "impedance": args.impedance,
+        "via_cost": args.via_cost,
+        "via_proximity_cost": args.via_proximity_cost,
+        "layer_costs": args.layer_costs,
+        "length_match_groups": args.length_match_groups,
+        "length_match_tolerance": args.length_match_tolerance,
+        "meander_amplitude": args.meander_amplitude,
     }.items() if v is not None}
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
@@ -253,6 +315,7 @@ def main() -> int:
         "vias": summary.get("total_vias", 0),
         "recipe": recipe or "all KRT defaults",
         "zones_stripped": stripped,
+        "sidecars_copied": sidecars or "none (in-place, or source had none)",
         "next": ("re-pour with add_zones.py (replay every net/layer Phase D "
                  "used), THEN run_drc.py — DRC on stale copper is all false "
                  "clearance violations"),

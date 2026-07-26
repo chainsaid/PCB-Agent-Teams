@@ -3,6 +3,7 @@
 | 限制 | 缓解 |
 |---|---|
 | **退化 courtyard 让闸门漏判重叠** | 某些 footprint(常见 THT 电解电容)courtyard 退化成一条线(w 或 h≈0)。`check_placement` 用 courtyard / pad-bbox 判重叠,会对这种件**误报 0 重叠 / score=100**,但 `run_drc` 用真几何会抓到。`get_geometry` 对 w/h<1mm 的 courtyard 自动回退 pad-bbox 并打 `geometry_uncertain`;`check_placement` 把它列进 `warnings`。规则:**被打 `geometry_uncertain` 的件,按它的 footprint 名推真实体积再摆**(如 `CP_Radial_D10.0mm` = 10mm 径向电解,真实 courtyard ≈11×11mm,远大于 pad-bbox 估的几 mm);**`run_drc`(Phase D)是几何最终裁判,闸门干净 ≠ DRC 干净**。 |
+| **pad 的 `at` 角是绝对角，`size` 是未旋转库值** | 板文件里 pad 的位置是 footprint 相对值（未旋转），但**角度已经含了 footprint 的旋转**（pcbnew 存盘写 `GetOrientation()`）。所以：**绝对 pad 角 = pad 自己那个角，不要再加 footprint 角**——加了等于把 90° 件转成 180°。而 `size` 永远是库里的未旋转尺寸，rot 90 的件在板上是"库高 × 库宽"。`extract_footprints` 已产出 `bbox_w/bbox_h`（board 空间 AABB = 铜 ∪ 孔，与 pcbnew `PAD::GetBoundingBox` 对齐），`get_geometry` 的 `pads[].w/h` 即此值。规则：**任何拿 pad 几何跟板坐标比的判断（间距 / 包含 / 重叠）只能用 bbox 字段**；`width/height` 只用于面积和 pitch 这类旋转无关量。回归测试 `tests/test_pad_geometry.py`。 |
 | **隔离槽 vs THT 器件物理冲突** | barrier 器件若是 THT SIP(pad pitch < 槽宽,如 SIP-4 pitch 2.54mm vs 槽宽 4.0mm),贯穿槽会切穿 pad → DRC `copper_edge_clearance`。**Phase D 的 `bridge_slot` 工具已自动解决**:重画槽,在每个跨槽 barrier 器件下方留实体桥(器件自身即隔离屏障,桥宽 ≥ 器件体高时仍满足爬电)。`bridge_slot` 须在元件摆定后跑。 |
 | 某些 footprint anchor 不在 body 中心（如 `Package_DIP:DIP-4_W7.62mm` anchor 在 pad 1），直接 SetPosition 会让 pad 落进 slot | apply_layout 用 bbox center 对齐 + Phase 2.7 防御 |
 | 4-pin 单列模块（B0505/IB0505 等 SIP-4）的 .py 里 net 接法可能跟 footprint pin 1 起算方向相反 | Phase 2.7 自动检测 ISO IC 的 HV/LV pad 位置不符就旋转 180° |

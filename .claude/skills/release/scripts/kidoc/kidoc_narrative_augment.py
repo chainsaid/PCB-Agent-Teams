@@ -108,8 +108,10 @@ def build_cross_references(section_type: str, analysis: dict,
     if section_type == 'power_design':
         if thermal_data:
             s = thermal_data.get('summary', {})
-            parts.append(f"See Thermal: score {s.get('thermal_score', '?')}/100, "
-                         f"{s.get('components_above_85c', 0)} above 85C")
+            ts = s.get('thermal_score', '?')
+            parts.append("See Thermal: score "
+                         + ("NOT ASSESSED" if ts is None else f"{ts}/100")
+                         + f", {s.get('components_above_85c', 0)} above 85C")
         if emc_data:
             dc_findings = [f for f in emc_data.get('findings', [])
                            if f.get('category') == 'decoupling' and not f.get('suppressed')]
@@ -137,6 +139,8 @@ def build_cross_references(section_type: str, analysis: dict,
             parts.append(f"EMC: {s.get('emc_risk_score', '?')}/100")
         if thermal_data:
             s = thermal_data.get('summary', {})
-            parts.append(f"Thermal: {s.get('thermal_score', '?')}/100")
+            ts = s.get('thermal_score', '?')
+            parts.append("Thermal: "
+                         + ("NOT ASSESSED" if ts is None else f"{ts}/100"))
 
     return '\n'.join(parts)

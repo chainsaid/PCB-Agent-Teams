@@ -276,7 +276,9 @@ def _extract_thermal_data(analysis: dict, **kwargs) -> str:
 
     parts = []
     summary = thermal_data.get('summary', {})
-    parts.append(f"Thermal score: {summary.get('thermal_score', '?')}/100")
+    _ts = summary.get('thermal_score', '?')
+    parts.append("Thermal score: " + ("NOT ASSESSED (no component dissipation "
+                                      "data)" if _ts is None else f"{_ts}/100"))
     parts.append(f"Total board dissipation: {summary.get('total_board_dissipation_w', '?')}W")
     parts.append(f"Ambient: {summary.get('ambient_c', 25.0)}C")
 
@@ -501,7 +503,9 @@ def _extract_executive_data(analysis: dict, **kwargs) -> str:
     thermal_data = kwargs.get('thermal_data')
     if thermal_data:
         t_sum = thermal_data.get('summary', {})
-        parts.append(f"Thermal score: {t_sum.get('thermal_score', '?')}/100")
+        _ts = t_sum.get('thermal_score', '?')
+        parts.append("Thermal score: "
+                     + ("NOT ASSESSED" if _ts is None else f"{_ts}/100"))
 
     # PCB
     pcb_data = kwargs.get('pcb_data')

@@ -8,7 +8,9 @@ binary, no pcbnew needed.
 Output per footprint:
   ref, value, x, y, angle, layer, type, pad_count,
   courtyard {min_x, min_y, max_x, max_y, w, h}   # real component extent
-  pads [{number, x, y, w, h, net}]               # absolute board coords
+  pads [{number, x, y, w, h, net}]               # absolute board coords,
+                                                 # w/h = board-space extent
+                                                 # (rotation applied)
   nets [...]                                      # distinct net names touched
 
 Usage:
@@ -42,8 +44,8 @@ def _pad_bbox(fp: dict) -> dict | None:
     for p in fp.get("pads", []):
         if "abs_x" not in p:
             continue
-        hw = p.get("width", 0) / 2.0
-        hh = p.get("height", 0) / 2.0
+        hw = p.get("bbox_w", p.get("width", 0)) / 2.0
+        hh = p.get("bbox_h", p.get("height", 0)) / 2.0
         xs += [p["abs_x"] - hw, p["abs_x"] + hw]
         ys += [p["abs_y"] - hh, p["abs_y"] + hh]
     if not xs:
@@ -131,10 +133,13 @@ def get_geometry(pcb_path: str, refs: set[str] | None = None,
             # than the real body. check_placement surfaces this as a warning.
             entry["geometry_uncertain"] = True
         if with_pads:
+            # w/h are the BOARD-SPACE extent, not the library size: a pad on a
+            # 90°-rotated footprint is as wide as the library pad is tall.
             entry["pads"] = [
                 {"number": p.get("number"),
                  "x": p.get("abs_x"), "y": p.get("abs_y"),
-                 "w": p.get("width"), "h": p.get("height"),
+                 "w": p.get("bbox_w", p.get("width")),
+                 "h": p.get("bbox_h", p.get("height")),
                  "net": p.get("net_name")}
                 for p in pads
             ]
