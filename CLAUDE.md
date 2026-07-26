@@ -15,6 +15,8 @@ PCB-Agent-Teams/
 ├── README.md             ← 对外文档 **英文版**（source of truth）
 ├── README.zh-CN.md       ← 对外文档 **中文版**（与 README.md 一一对应，必须同步）
 ├── USER.md               ← 在手硬件、所属地、能力、偏好（必读；不入 git，从 USER.md.example 复制）
+├── assets/               ← README 用图（进 git）；README 引图只能从这里引
+├── docs/                 ← 本地稿，**.gitignore 不发布**（宣传稿 / 板照）；对外内容写 README，别写这
 ├── lib_external/         ← 共享元件库（CONVENTIONS.md）
 ├── lib_cache/sources/    ← 外部库只读 cache（pre-filter 池，不被项目引用）
 ├── .venv/                ← Python 3.12（禁 3.13/3.14）
