@@ -25,8 +25,10 @@ Usage:
            [--board-edge-clearance 0.6] [--nets PAT ...]
            [--track-width MM] [--power-nets NET ... --power-nets-widths MM ...]
            [--ordering {inside_out,mps,original}] [--via-size MM] [--via-drill MM]
-           [--clearance MM] [--layers LAYER ...] [--impedance OHM]
-           [--via-cost N] [--via-proximity-cost N] [--layer-costs MULT ...]
+           [--clearance MM] [--grid-step MM] [--layers LAYER ...]
+           [--impedance OHM] [--via-cost N] [--via-proximity-cost N]
+           [--stub-proximity-radius MM] [--stub-proximity-cost X]
+           [--layer-costs MULT ...]
            [--length-match-group PAT ... [--length-match-group PAT ...]]
            [--length-match-tolerance MM] [--meander-amplitude MM]
 
@@ -92,6 +94,15 @@ def main() -> int:
                     help="via drill diameter mm (unset → KRT default)")
     ap.add_argument("--clearance", type=float, metavar="MM",
                     help="track-to-track clearance mm (unset → KRT default)")
+    ap.add_argument("--grid-step", type=float, metavar="MM",
+                    help="A* grid resolution mm (unset → KRT default 0.1). "
+                         "A pad centre off-grid shifts the exit point by up "
+                         "to half a step — on fine-pitch connectors that "
+                         "alone can eat the whole exit margin. If a target "
+                         "net's tightest pad-to-pad gap is only a few grid "
+                         "steps wide, lower this before concluding the net "
+                         "is unroutable (finer grid costs runtime, not "
+                         "correctness). See routing.md 细间距 entry")
     ap.add_argument("--layers", nargs="+", metavar="LAYER",
                     help="copper layers to route on (unset → KRT default F.Cu B.Cu)")
     ap.add_argument("--impedance", type=float, metavar="OHM",
@@ -106,6 +117,18 @@ def main() -> int:
     ap.add_argument("--via-proximity-cost", type=int, metavar="N",
                     help="via cost multiplier inside stub / fine-pitch "
                          "proximity zones (KRT default 10; 0 blocks vias there)")
+    ap.add_argument("--stub-proximity-radius", type=float, metavar="MM",
+                    help="radius mm around UNROUTED nets' pad stubs that gets "
+                         "a routing penalty (KRT default 2.0). With --nets, "
+                         "every net NOT selected still reserves this space — "
+                         "on a mostly-unrouted board that can wall off the "
+                         "very exits the selected nets need (see "
+                         "routing_strategy.md 布线顺序). Shrink it when a "
+                         "first-pass net fails right at its own pads, then "
+                         "re-check clearances around neighbouring pads")
+    ap.add_argument("--stub-proximity-cost", type=float, metavar="X",
+                    help="penalty strength inside stub proximity zones "
+                         "(KRT default 0.2)")
     ap.add_argument("--layer-costs", nargs="+", type=float, metavar="MULT",
                     help="per-layer cost multipliers, positionally paired with "
                          "--layers. Push traffic onto a preferred layer, e.g. "
@@ -253,6 +276,8 @@ def main() -> int:
         cmd += ["--via-drill", str(args.via_drill)]
     if args.clearance is not None:
         cmd += ["--clearance", str(args.clearance)]
+    if args.grid_step is not None:
+        cmd += ["--grid-step", str(args.grid_step)]
     if args.layers:
         cmd += ["--layers"] + args.layers
     if args.impedance is not None:
@@ -261,6 +286,10 @@ def main() -> int:
         cmd += ["--via-cost", str(args.via_cost)]
     if args.via_proximity_cost is not None:
         cmd += ["--via-proximity-cost", str(args.via_proximity_cost)]
+    if args.stub_proximity_radius is not None:
+        cmd += ["--stub-proximity-radius", str(args.stub_proximity_radius)]
+    if args.stub_proximity_cost is not None:
+        cmd += ["--stub-proximity-cost", str(args.stub_proximity_cost)]
     if args.layer_costs:
         cmd += ["--layer-costs"] + [str(c) for c in args.layer_costs]
     for grp in (args.length_match_groups or []):
@@ -279,10 +308,13 @@ def main() -> int:
         "via_size": args.via_size,
         "via_drill": args.via_drill,
         "clearance": args.clearance,
+        "grid_step": args.grid_step,
         "layers": args.layers,
         "impedance": args.impedance,
         "via_cost": args.via_cost,
         "via_proximity_cost": args.via_proximity_cost,
+        "stub_proximity_radius": args.stub_proximity_radius,
+        "stub_proximity_cost": args.stub_proximity_cost,
         "layer_costs": args.layer_costs,
         "length_match_groups": args.length_match_groups,
         "length_match_tolerance": args.length_match_tolerance,

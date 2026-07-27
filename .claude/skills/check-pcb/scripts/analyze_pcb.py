@@ -827,12 +827,23 @@ def extract_footprints(root: list) -> list[dict]:
 
             pads.append(pad_info)
 
-        # Extract courtyard bounding box (absolute coordinates)
+        # Extract graphics bounding boxes (absolute coordinates).
+        # CrtYd graphics drive the courtyard extent; silk / fab / user-drawing
+        # graphics feed a body-extent fallback (`graphics_bbox`) for libraries
+        # that ship no courtyard layer at all — common in converted libraries.
         crtyd_pts: list[tuple[float, float]] = []
+        body_pts: list[tuple[float, float]] = []
         for gtype in ("fp_line", "fp_rect", "fp_circle", "fp_poly", "fp_arc"):
             for item in find_all(fp, gtype):
                 item_layer = get_value(item, "layer")
-                if not item_layer or "CrtYd" not in item_layer:
+                if not item_layer:
+                    continue
+                if "CrtYd" in item_layer:
+                    bucket = crtyd_pts
+                elif ("SilkS" in item_layer or "Fab" in item_layer
+                        or "Dwgs.User" in item_layer):
+                    bucket = body_pts
+                else:
                     continue
                 # fp_poly: extract all vertex coordinates
                 if gtype == "fp_poly":
@@ -846,7 +857,7 @@ def extract_footprints(root: list) -> list[dict]:
                                     rx = lx * math.cos(rad) - ly * math.sin(rad)
                                     ry = lx * math.sin(rad) + ly * math.cos(rad)
                                     lx, ly = rx, ry
-                                crtyd_pts.append((x + lx, y + ly))
+                                bucket.append((x + lx, y + ly))
                     continue
                 for key in ("start", "end", "center", "mid"):
                     node = find_first(item, key)
@@ -858,7 +869,7 @@ def extract_footprints(root: list) -> list[dict]:
                             rx = lx * math.cos(rad) - ly * math.sin(rad)
                             ry = lx * math.sin(rad) + ly * math.cos(rad)
                             lx, ly = rx, ry
-                        crtyd_pts.append((x + lx, y + ly))
+                        bucket.append((x + lx, y + ly))
 
         fp_entry: dict = {
             "library": fp_lib,
@@ -914,6 +925,13 @@ def extract_footprints(root: list) -> list[dict]:
             fp_entry["courtyard"] = {
                 "min_x": round(min(cxs), 3), "min_y": round(min(cys), 3),
                 "max_x": round(max(cxs), 3), "max_y": round(max(cys), 3),
+            }
+        if body_pts:
+            gxs = [p[0] for p in body_pts]
+            gys = [p[1] for p in body_pts]
+            fp_entry["graphics_bbox"] = {
+                "min_x": round(min(gxs), 3), "min_y": round(min(gys), 3),
+                "max_x": round(max(gxs), 3), "max_y": round(max(gys), 3),
             }
 
         footprints.append(fp_entry)

@@ -181,6 +181,12 @@ def check_placement(pcb_path: str, min_clearance: float = 0.2,
     warn = [v for v in violations if v["severity"] == "warning"]
     score = max(0.0, 100.0 - HARD_PENALTY * len(hard) - WARN_PENALTY * len(warn))
 
+    # Where each footprint's extent came from. `graphics` (body drawings) is a
+    # sound proxy; `pad_bbox` means the extent under-reports the real body.
+    extent_source = {"courtyard": 0, "graphics": 0, "pad_bbox": 0}
+    for f in fps:
+        extent_source[f["courtyard"].get("_from", "courtyard")] += 1
+
     metrics = {
         "hpwl_mm": round(hpwl, 2),
         "courtyard_overlaps": sum(1 for v in hard
@@ -190,21 +196,29 @@ def check_placement(pcb_path: str, min_clearance: float = 0.2,
                                         if v["type"] == "pad_clearance"),
         "barrier_crossings": sum(1 for v in hard
                                  if v["type"] == "barrier_crossing"),
+        "extent_source": extent_source,
+        # Self-attesting gate state: without these, "check skipped" and
+        # "checked and clean" produce identical output — the caller cannot
+        # tell a disarmed gate from a passing one.
+        "barrier_check": "run" if barrier_x is not None else "skipped_no_flag",
+        "decoupling_pairing": "declared" if decoupling_pairs else "net_inferred",
     }
 
-    # Footprints whose courtyard was degenerate — their extent is a pad-bbox
-    # guess smaller than the real body, so this gate may MISS a real overlap
-    # that KiCad's DRC will still catch. Surface them so the AI does not trust
-    # a clean gate blindly — run_drc in Phase D is the geometry authority.
+    # Footprints with no courtyard AND no body graphics — their extent is a
+    # pad-bbox guess smaller than the real body, so this gate may MISS a real
+    # overlap. KiCad's DRC does NOT back this up: its courtyard check needs
+    # the CrtYd layer too, so a library without it is blind in BOTH tools.
+    # Surface these so the AI verifies against a render / datasheet instead.
     uncertain = sorted(f["ref"] for f in fps if f.get("geometry_uncertain"))
     warnings = []
     if uncertain:
         warnings.append({
             "type": "geometry_uncertain",
             "refs": uncertain,
-            "detail": (f"{len(uncertain)} footprint(s) have a degenerate "
-                       f"courtyard — overlap check used a pad-bbox guess; "
-                       f"verify against run_drc"),
+            "detail": (f"{len(uncertain)} footprint(s) have neither courtyard "
+                       f"nor body graphics — overlap check used a pad-bbox "
+                       f"guess that under-reports the body, and KiCad DRC is "
+                       f"equally blind without CrtYd; verify spacing visually"),
         })
 
     # Connectors / switches sitting mid-board — wires/cables can't reach,
@@ -213,13 +227,26 @@ def check_placement(pcb_path: str, min_clearance: float = 0.2,
     if board:
         bx0, by0 = board["min_x"], board["min_y"]
         bx1, by1 = bx0 + board["w"], by0 + board["h"]
+        # Which parts count as interface parts comes from placement_brief's
+        # edge_devices (footprint-name based). A refdes-prefix rule here would
+        # re-open the blind spot the shared identifier exists to close.
+        edge_dev = {e["ref"]: e for e in (brief or {}).get("edge_devices", [])}
         off_edge = []
         for f in fps:
-            if not (f["ref"][:1] == "J" or f["ref"].startswith("SW")):
+            e = edge_dev.get(f["ref"])
+            if e is None:
                 continue
             c = f["courtyard"]
-            gap = min(c["min_x"] - bx0, bx1 - c["max_x"],
-                      c["min_y"] - by0, by1 - c["max_y"])
+            lo_x, hi_x = c["min_x"], c["max_x"]
+            lo_y, hi_y = c["min_y"], c["max_y"]
+            # Measure from the real body: a degenerate courtyard is the pad
+            # bbox, which sits mm inside a connector's shell and would report
+            # a correctly edge-mounted part as "mid-board".
+            bb = e.get("body_bbox")
+            if bb:
+                lo_x, hi_x = min(lo_x, bb[0]), max(hi_x, bb[1])
+                lo_y, hi_y = min(lo_y, bb[2]), max(hi_y, bb[3])
+            gap = min(lo_x - bx0, bx1 - hi_x, lo_y - by0, by1 - hi_y)
             if gap > EDGE_MM:
                 off_edge.append((f["ref"], round(gap, 1)))
         if off_edge:

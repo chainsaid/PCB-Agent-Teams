@@ -2001,10 +2001,203 @@ def mode_set_silk_spec(spec):
     }
 
 
+# =============================================================
+# Mode: place_silk_refs — greedy reference-designator placement
+# =============================================================
+# Cost weights, highest first. Off-board is fatal (the print gets clipped);
+# ink on an exposed pad degrades the solder joint; designators on top of each
+# other are unreadable; a designator on another part's outline is exactly what
+# silk_overlap reports; a body underneath is merely cosmetic.
+_SILK_W_PAD = 50.0
+_SILK_W_REF = 10.0
+_SILK_W_SILK = 8.0
+_SILK_W_BODY = 1.0
+_SILK_W_OFFBOARD = 1e6
+
+
+def silk_rect_overlap(a, b):
+    """Overlap area (mm²) of two (x0, y0, x1, y1) rects."""
+    ox = min(a[2], b[2]) - max(a[0], b[0])
+    oy = min(a[3], b[3]) - max(a[1], b[1])
+    return max(0.0, ox) * max(0.0, oy)
+
+
+def silk_candidates(body, tw, th, gaps, allow_rotate):
+    """Candidate (angle, w, h, cx, cy) spots for a tw×th designator around a
+    body rect: 8 compass directions × each gap, horizontal and (optionally)
+    rotated 90° — the rotated form fits narrow gaps between parts — plus dead
+    centre when the body dwarfs the text (>3× in both axes)."""
+    cx, cy = (body[0] + body[2]) / 2, (body[1] + body[3]) / 2
+    hw, hh = (body[2] - body[0]) / 2, (body[3] - body[1]) / 2
+    forms = [(0.0, tw, th)] + ([(90.0, th, tw)] if allow_rotate else [])
+    out = []
+    for ang, w, h in forms:
+        for gap in gaps:
+            for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0),
+                           (-1, -1), (1, -1), (-1, 1), (1, 1)):
+                out.append((ang, w, h,
+                            cx + dx * (hw + w / 2 + gap),
+                            cy + dy * (hh + h / 2 + gap)))
+        if hw * 2 > 3 * w and hh * 2 > 3 * h:
+            out.append((ang, w, h, cx, cy))
+    return out
+
+
+def silk_edge_keepouts(er, margin):
+    """Keepout rects for one Edge.Cuts drawing bbox, inflated by margin.
+    A line-like bbox (straight segment) becomes one band. A large bbox — a
+    closed outline drawn as a single gr_rect or circle — contributes its four
+    perimeter bands instead: inflating the whole bbox would blanket the board
+    interior and mark every candidate fatal."""
+    x0, y0, x1, y1 = er
+    if min(x1 - x0, y1 - y0) <= 2 * margin:
+        return [(x0 - margin, y0 - margin, x1 + margin, y1 + margin)]
+    return [
+        (x0 - margin, y0 - margin, x1 + margin, y0 + margin),
+        (x0 - margin, y1 - margin, x1 + margin, y1 + margin),
+        (x0 - margin, y0 - margin, x0 + margin, y1 + margin),
+        (x1 - margin, y0 - margin, x1 + margin, y1 + margin),
+    ]
+
+
+def silk_cost(r, dist, w_dist, board_rect, edges, pads, silks, refs, bodies,
+              own_idx):
+    """Score rect r against the board: weighted overlap with every obstacle
+    class plus a distance term. `edges` are Edge.Cuts keepout rects (each
+    drawing's bbox inflated by the edge margin) — they catch internal slots
+    and cutouts, which the outer board_rect test cannot see. refs[own_idx]
+    must already be None so the designator never scores against its own
+    previous spot; its own body counts triple so centring on the part stays
+    a last resort."""
+    c = dist * w_dist
+    if (r[0] < board_rect[0] or r[1] < board_rect[1]
+            or r[2] > board_rect[2] or r[3] > board_rect[3]):
+        c += _SILK_W_OFFBOARD
+    for eb in edges:
+        c += silk_rect_overlap(r, eb) * _SILK_W_OFFBOARD
+    for pb in pads:
+        c += silk_rect_overlap(r, pb) * _SILK_W_PAD
+    for sb in silks:
+        c += silk_rect_overlap(r, sb) * _SILK_W_SILK
+    for j, rb in enumerate(refs):
+        if rb is not None and j != own_idx:
+            c += silk_rect_overlap(r, rb) * _SILK_W_REF
+    for j, ob in enumerate(bodies):
+        c += silk_rect_overlap(r, ob) * (_SILK_W_BODY * 3.0 if j == own_idx
+                                         else _SILK_W_BODY)
+    return c
+
+
+def mode_place_silk_refs(spec):
+    """Greedy placement of every visible reference designator.
+
+    set_silk_spec decides how BIG silk text is; nothing else in the toolbox
+    decides WHERE it sits, and fab-spec text on a dense board lands on pads
+    and neighbours. Each designator tries the silk_candidates ring around its
+    body and keeps the cheapest spot by silk_cost. Several passes, because a
+    designator placed early cannot see the ones placed after it — later
+    passes re-optimise against the settled layout.
+
+    spec: {pcb_path, output_pcb, passes, gaps_mm, w_dist, allow_rotate,
+           edge_margin_mm}
+    """
+    pcb_path = spec["pcb_path"]
+    output_pcb = spec.get("output_pcb", pcb_path)
+    passes = int(spec.get("passes") or 4)
+    gaps = [float(g) for g in
+            (spec.get("gaps_mm") or (0.15, 0.3, 0.5, 0.8, 1.2))]
+    w_dist = float(spec.get("w_dist") or 3.0)
+    allow_rotate = bool(spec.get("allow_rotate", True))
+    # Text that merely stays inside Edge.Cuts can still sit closer to the
+    # edge than the fab's silk-to-edge clearance, so DRC trades silk_overlap
+    # for silk_edge_clearance. Shrink the allowed area by this margin.
+    edge_margin = float(spec.get("edge_margin_mm", 0.5))
+
+    board = pcbnew.LoadBoard(pcb_path)
+
+    def rect(bb):
+        return (pcbnew.ToMM(bb.GetLeft()), pcbnew.ToMM(bb.GetTop()),
+                pcbnew.ToMM(bb.GetRight()), pcbnew.ToMM(bb.GetBottom()))
+
+    board_rect = rect(board.GetBoardEdgesBoundingBox())
+    board_rect = (board_rect[0] + edge_margin, board_rect[1] + edge_margin,
+                  board_rect[2] - edge_margin, board_rect[3] - edge_margin)
+    if (board_rect[2] - board_rect[0] <= 0
+            or board_rect[3] - board_rect[1] <= 0):
+        return {"ok": False,
+                "error": "board has no Edge.Cuts extent — every candidate "
+                         "would score off-board. Draw the outline first"}
+
+    # Every Edge.Cuts drawing, inflated by the margin, is a keepout — this is
+    # what catches internal slots / cutouts sitting far from the outer edge.
+    edges = []
+    for d in board.GetDrawings():
+        if board.GetLayerName(d.GetLayer()) == "Edge.Cuts":
+            edges.extend(silk_edge_keepouts(rect(d.GetBoundingBox()),
+                                            edge_margin))
+
+    fps = list(board.GetFootprints())
+    bodies = [rect(f.GetBoundingBox(False, False)) for f in fps]
+    pads = [rect(p.GetBoundingBox()) for f in fps for p in f.Pads()]
+    silks = []
+    for f in fps:
+        for g in f.GraphicalItems():
+            if board.GetLayerName(g.GetLayer()) in ("F.Silkscreen",
+                                                    "B.Silkscreen"):
+                silks.append(rect(g.GetBoundingBox()))
+    refs = [rect(f.Reference().GetBoundingBox())
+            if f.Reference().IsVisible() else None for f in fps]
+
+    for _ in range(passes):
+        for i, fp in enumerate(fps):
+            ref = fp.Reference()
+            if not ref.IsVisible():
+                continue
+            # Measure the text horizontal — its box is what gets packed.
+            ref.SetTextAngle(pcbnew.EDA_ANGLE(0, pcbnew.DEGREES_T))
+            tb = rect(ref.GetBoundingBox())
+            tw, th = tb[2] - tb[0], tb[3] - tb[1]
+            body = bodies[i]
+            cx, cy = (body[0] + body[2]) / 2, (body[1] + body[3]) / 2
+            hw, hh = (body[2] - body[0]) / 2, (body[3] - body[1]) / 2
+            refs[i] = None
+            best, best_cost = None, None
+            for ang, w, h, px, py in silk_candidates(body, tw, th, gaps,
+                                                     allow_rotate):
+                r = (px - w / 2, py - h / 2, px + w / 2, py + h / 2)
+                dist = max(0.0, max(abs(px - cx) - hw, abs(py - cy) - hh))
+                c = silk_cost(r, dist, w_dist, board_rect, edges, pads,
+                              silks, refs, bodies, i)
+                if best_cost is None or c < best_cost:
+                    best_cost, best = c, (ang, px, py, r)
+            ang, px, py, r = best
+            ref.SetPosition(pcbnew.VECTOR2I(pcbnew.FromMM(px),
+                                            pcbnew.FromMM(py)))
+            ref.SetTextAngle(pcbnew.EDA_ANGLE(ang, pcbnew.DEGREES_T))
+            refs[i] = r
+
+    if not pcbnew.SaveBoard(output_pcb, board):
+        return {"ok": False, "error": f"SaveBoard failed: {output_pcb}"}
+
+    return {
+        "ok": True,
+        "output_pcb": output_pcb,
+        "refs_placed": sum(1 for r in refs if r is not None),
+        "hidden_skipped": sum(1 for r in refs if r is None),
+        "passes": passes,
+        "gaps_mm": gaps,
+        "next": "re-run run_drc and DIFF silk_overlap / silk_over_copper "
+                "against the pre-placement counts — the greedy cost "
+                "minimises overlap, it cannot guarantee zero on a dense "
+                "board. Then render for an eyeball pass",
+    }
+
+
 MODES = {
     "create_pcb": mode_create_pcb,
     "stitch_zones": mode_stitch_zones,
     "set_silk_spec": mode_set_silk_spec,
+    "place_silk_refs": mode_place_silk_refs,
     "apply_layout": mode_apply_layout,
     "classify_fps": mode_classify_fps,
     "check_slot_clearance": mode_check_slot_clearance,

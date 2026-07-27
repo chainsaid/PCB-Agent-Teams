@@ -4,12 +4,15 @@ description: >-
   KiCad PCB component-placement expert (Phase 4) — an AI toolbox plus an agentic placement loop,
   not a one-shot pipeline. ALWAYS invoke this skill when placing components into a .kicad_pcb from
   a frozen schematic + project CLAUDE.md, doing HV/LV/ISO region partitioning, isolation-barrier
-  placement, or GND copper pour. Do not string-concatenate .kicad_pcb, place before reading
-  placement_brief, default rot=0 on isolation/polarized parts, or treat check_placement's score as
-  an objective to minimize. Use this skill first. Optional Phase E auto-routes via the vendored
-  KiCadRoutingTools (KRT). Deep review (analyzer / EMC / thermal / cross-ref) belongs to check-pcb.
-  Triggers: 画 PCB / PCB 布局 / 摆元件到 PCB / 区域分区 / 隔离屏障 / GND zone / 自动布局 / 自动布线 /
-  draw pcb / place components / generate pcb layout / run pcb placement / route pcb.
+  placement, GND copper pour, or checking that connectors face outward and can actually be
+  plugged in. Do not string-concatenate .kicad_pcb, place before reading placement_brief, default
+  rot=0 on isolation/polarized parts, assume a connector hugging the board edge is therefore
+  oriented correctly, or treat check_placement's score as an objective to minimize. Use this skill
+  first. Optional Phase E auto-routes via the vendored KiCadRoutingTools (KRT). Deep review
+  (analyzer / EMC / thermal / cross-ref) belongs to check-pcb.
+  Triggers: 画 PCB / PCB 布局 / 摆元件到 PCB / 区域分区 / 隔离屏障 / GND zone / 连接器朝向 /
+  连接器插不进 / 自动布局 / 自动布线 / draw pcb / place components / connector mating direction /
+  generate pcb layout / run pcb placement / route pcb.
 routes-exempt: scripts/vendor/**
 ---
 
@@ -33,8 +36,10 @@ routes-exempt: scripts/vendor/**
 ## 不做什么(交棒)
 
 sch 没画好 → `draw-schematic`;深度审图 / EMC / thermal / cross-ref → `check-pcb`;出 Gerber → `release`。
-**已摆好的板只审不改**(「这布局有没有问题」)→ `placement_brief` + `check_placement` + `render` 看图,
-**禁跑 `init_layout`**——它全量重算,会静默抹掉已有布局且不可逆。
+**已摆好的板只审不改**(「这布局有没有问题」)→ `check_chirality` + `check_footprint_sanity`(外来板的库先体检)
+→ `placement_brief` + `check_placement`(**必带 --barrier-x + --decoupling-pairs**)
++ `check_connector_access` + `run_drc` + 有铜再加 `check_zones` + `render` 看图,
+**禁跑 `init_layout`**——它全量重算,会静默抹掉已有布局且不可逆(板上有 `locked` 件会拒跑)。
 
 ## 工具箱(全集;调用形式 + 输出 schema 见 `references/tools.md`)
 
@@ -42,19 +47,22 @@ sch 没画好 → `draw-schematic`;深度审图 / EMC / thermal / cross-ref → 
 |---|---|
 | `init_pcb` | sch → 空 `.kicad_pcb` |
 | `check_chirality` | 手性闸门:双排蛇形 IC 顺时针=库镜像(群体判据) |
+| `check_footprint_sanity` | 库数据体检:钻孔>铜箔 / 零环宽 PTH / 缺 CrtYd |
 | `placement_brief` | 抽电路事实:域 / barrier 器件 + pad→net / cap-IC 链接 / chains / net-pad |
 | `init_layout` | 确定性区域初始解,当种子 |
 | `get_geometry` | 每件 ref/center/courtyard bbox/pad/net |
 | `move` | 移动/旋转(target = body-bbox 中心) |
 | `check_placement` | 合法性闸门:重叠 / 间距 / 越界 / 穿屏障 → `hard_fail` |
+| `check_connector_access` | 可用性闸门:开口朝板外 / 贴板边 / 通道没挡 → `hard_fail` |
 | `render` | 标注 PNG(courtyard/重叠/屏障线/飞线) |
 | `refit_board` | Edge.Cuts + 槽缩到元件范围;`fill_ratio`。锁框用 `--keep-outline` |
 | `bridge_slot` | 隔离槽在跨槽 barrier 器件下留实体桥(元件摆定 + refit 后跑) |
 | `add_zones` | GND 铺铜;按 `(net,layer)` 分别调,幂等 |
 | `check_zones` | **验铜没跨隔离屏障**——铜跨槽同网 DRC 报不出,唯一防线 |
 | `stitch_zones` · `set_silk_spec` | 缝合过孔(铺铜后)/ 丝印字高线宽 |
+| `place_silk_refs` | 贪心摆位号:压 pad/丝印/彼此/贴板边(含内部槽)最小化 |
 | `set_design_rules` | fab 规则写进 `.kicad_pro`(DRC 只认这) |
-| `run_drc` | kicad-cli DRC,几何裁判 |
+| `run_drc` | kicad-cli DRC,几何裁判。`violation_count=0` = 无**未豁免**违例(静默套用 `.kicad_pro` 的 `drc_exclusions`,当闸门用前先核对豁免列表) |
 | `route` | 自动布线(vendored KRT)→ `_routed.kicad_pcb` |
 | `net_metrics` | 每网长度 / 过孔 / 线宽 / 差分对 delta,**唯一量具** |
 
@@ -63,17 +71,21 @@ sch 没画好 → `draw-schematic`;深度审图 / EMC / thermal / cross-ref → 
 ## 布局回路(A→D,**每步必打印可见输出**)
 
 ```
-A 理解电路   init_pcb → check_chirality(镜像=停,先修库)→ placement_brief
+A 理解电路   init_pcb → check_chirality(镜像=停,先修库)
+   → check_footprint_sanity(padstack 坏=停,先修库)→ placement_brief
    → 读项目 CLAUDE.md 的 placement 意图
-   打印:手性回执 / 域划分 / barrier 器件 / 去耦对 / chains —— 不打印不算做过
+   打印:手性+sanity 回执 / 域划分 / barrier 器件 / 去耦对 / chains —— 不打印不算做过
 B 按电路布局  init_layout 出种子 → AI 按 brief 摆:去耦贴 IC、回路收紧、
    隔离器件按引脚定向、chain 按序 → move 落子
    打印:这一轮移了哪些件 + 每个为什么
 C 验证迭代   check_placement(闸门,**必带 --barrier-x + --decoupling-pairs**,漏 flag = 闸门关掉)
-   + render(看图)。隔离器件朝向闸门不管,自己 get_geometry 逐 pad 复核(为什么 → loop.md)
+   + check_connector_access(可用性闸门:朝向 / 贴边 / 插拔通道)
+   + render(看图)。隔离器件朝向两个闸门都不管,自己 get_geometry 逐 pad 复核(为什么 → loop.md)
    打印:hard_fail / 违例清单 / 对照 brief 看飞线判断回路紧不紧
    → 修被判断出的具体问题,回到 B(**从第 2 步进,不重跑 init_layout**),重复
-D 收尾       refit_board → bridge_slot → add_zones → check_zones → run_drc → render 终图
+D 收尾       set_design_rules(fab 规则→.kicad_pro,一次;DRC 只认这)→ refit_board
+   → bridge_slot → add_zones → check_zones → set_silk_spec(有丝印规格时)
+   → place_silk_refs(跑了字号就跟着摆位号)→ run_drc → render 终图
    add_zones 不是无脑收尾:铺哪面 / 哪个 GND 网 / 铺不铺,按 references/copper_pour.md
    逐面逐区判断(安规 veto 优先);多 GND 网用 --nets 按域分开调用
    打印:板框尺寸 / fill_ratio / 铺了哪些 (net,layer) + 为什么 / DRC 违例数 / 终图 /
@@ -83,7 +95,8 @@ D 收尾       refit_board → bridge_slot → add_zones → check_zones → run
 ## Phase E — 自动布线(可选,过 route-ready 验收后)
 
 ```
-route → add_zones(重铺,复现 D 的每个 net·layer) → run_drc → check_zones
+route → add_zones(重铺,复现 D 的每个 net·layer)→ stitch_zones(双层板缝通两面地)
+   → run_drc → check_zones → net_metrics(声明过等长/过孔/宽度约束时必量)
    route 不裸跑:先按 references/routing_strategy.md 给 net 分类定配方
    打印:net 分类 + 配方参数 + 为什么;布完打印:布通网数 / vias / 重铺 zone /
    DRC 违例 + unconnected —— 不打印不算布过

@@ -10,6 +10,11 @@ critical" or "place these 3mm apart" — that judgement is the AI's job, made
 on top of this brief plus the project CLAUDE.md placement intent.
 
 Extracted:
+  edge_devices     connectors / switches + which way each one has to face, and
+                   the rotation that achieves it (the fact placement needs
+                   before it moves anything)
+  power_nets       supply rails, found by structure (≥2 decoupling caps to
+                   ground) OR name — routing must widen these
   domains          each footprint → HV / ISO / LV (net-name + value regex vote)
   barrier_devices  footprints whose pads span two domains — must be oriented
                    so each domain's pads face that domain (the rotation fact)
@@ -33,6 +38,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from get_geometry import get_geometry  # noqa: E402
+from connector_id import classify  # noqa: E402
+from net_roles import classify_nets  # noqa: E402
+from check_connector_access import (MIN_CONFIDENCE_MM, angle_for_edge,  # noqa: E402
+                                    mating_sides)
 
 # Reuse init_layout's domain regex — brief and partition must agree.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "placement_v2"))
@@ -96,8 +105,13 @@ def build_brief(pcb_path: str) -> dict:
             if p.get("net"):
                 net_pads[p["net"]].append(f"{f['ref']}.{p.get('number')}")
 
-    power_nets = sorted(n for n in net_pads if POWER_NET_REGEX.search(n))
-    ground_nets = sorted(n for n in net_pads if _GND_RE.search(n))
+    # Rails are found by structure first (a supply is what ≥2 decoupling caps
+    # bypass to ground) and by name second — a name whitelist silently misses
+    # VDD / VEXT / VBUS and then everything downstream routes them as signals.
+    roles = classify_nets({f["ref"]: set(f.get("nets", [])) for f in fps})
+    power_nets = sorted(n for n in roles["power"] if n in net_pads)
+    ground_nets = sorted(n for n in roles["ground"] if n in net_pads)
+    noise_nets = set(roles["topology_noise"])
 
     # domains
     footprint_domain = {f["ref"]: _footprint_domain(f) for f in fps}
@@ -105,11 +119,51 @@ def build_brief(pcb_path: str) -> dict:
     for ref, d in footprint_domain.items():
         domains[d].append(ref)
 
-    # edge_devices — connectors (J*) and user-operated switches (SW*) must
-    # sit on the board perimeter: wires/cables attach at the edge, a switch
-    # needs to be reachable. A connector mid-board forces cables across it.
-    edge_devices = sorted(f["ref"] for f in fps
-                          if f["ref"][:1] == "J" or f["ref"].startswith("SW"))
+    # edge_devices — interface parts must sit on the board perimeter: cables
+    # attach at the edge, a switch has to be reachable. Identification is by
+    # footprint library name first (see connector_id) — a refdes-prefix rule
+    # silently drops every connector on a board ported from another EDA tool,
+    # and a part nobody flags is a part nobody places at the edge.
+    #
+    # Each entry also carries the footprint's mating side and the rotation that
+    # aims it at each board edge, so orientation is decided *before* placement.
+    # Hugging the edge with the opening pointing inward passes every other
+    # check and yields a board that cannot be plugged in.
+    sides = mating_sides(pcb_path)
+    edge_devices = []
+    for f in fps:
+        ref = f["ref"]
+        info = sides.get(ref, {})
+        kind = classify(ref, f.get("footprint", ""),
+                        body_overhang_mm=info.get("body_overhang_mm", 0.0))
+        if kind is None:
+            continue
+        local = info.get("local_side")
+        entry = {
+            "ref": ref, "value": f.get("value", ""),
+            "footprint": f.get("footprint", ""), "kind": kind,
+            "mating_side_local": local,
+            "mating_confidence_mm": info.get("confidence_mm"),
+            # pads ∪ body outline, board coords — the extent any edge-distance
+            # test must use (courtyard degrades to the pad bbox on libraries
+            # that ship no CrtYd, understating a connector by several mm).
+            "body_bbox": info.get("body_bbox"),
+        }
+        # Only hand out a rotation table when the mating side is actually
+        # known. A table computed from a 0.01mm asymmetry reads exactly as
+        # authoritative as a real one — and gets followed.
+        if local and (info.get("confidence_mm") or 0.0) >= MIN_CONFIDENCE_MM:
+            entry["angle_for_edge"] = {
+                d: angle_for_edge(local, d) for d in ("-X", "+X", "-Y", "+Y")}
+        else:
+            entry["mating_side_local"] = None
+            entry["mating_unknown_reason"] = (
+                info.get("reason")
+                or f"no side won by ≥{MIN_CONFIDENCE_MM}mm "
+                   f"(best {info.get('confidence_mm')}mm) — read the datasheet "
+                   f"and declare mating_dir")
+        edge_devices.append(entry)
+    edge_devices.sort(key=lambda e: e["ref"])
 
     # barrier devices — the rotation-critical parts. A galvanic-isolation
     # device is the thing that bridges two ground domains, so its true
@@ -163,7 +217,7 @@ def build_brief(pcb_path: str) -> dict:
                if f["ref"][:1] in ("R", "L") and f.get("pad_count") == 2]
     adj: dict[str, set[str]] = defaultdict(set)
     for net, pads in net_pads.items():
-        if POWER_NET_REGEX.search(net):
+        if net in noise_nets:
             continue  # power/gnd nets connect everything — not a chain signal
         refs = sorted({pd.split(".")[0] for pd in pads} & set(twoterm))
         for i in range(len(refs)):
@@ -235,6 +289,8 @@ def build_brief(pcb_path: str) -> dict:
         "cap_ic_links": cap_ic_links,
         "chains": chains,
         "power_nets": power_nets,
+        # why each net was called a rail — so a wrong call is auditable
+        "power_net_why": {n: roles["why"][n] for n in power_nets},
         "ground_nets": ground_nets,
         "net_pads": {n: sorted(p) for n, p in sorted(net_pads.items())},
         "_note": ("Mechanical facts only. EMC-criticality, exact spacing and "

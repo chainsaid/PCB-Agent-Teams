@@ -176,12 +176,17 @@ def _coerce(v: str):
 
 def extract_pcb_data(pcb_path: Path) -> Tuple[Dict[str, Set[str]],
                                                 Dict[str, str],
-                                                Dict[str, Tuple[float, float]]]:
-    """Pull (footprint_nets, footprint_values, footprint_sizes) from a .kicad_pcb.
+                                                Dict[str, Tuple[float, float]],
+                                                List[str]]:
+    """Pull (footprint_nets, footprint_values, footprint_sizes, locked_refs)
+    from a .kicad_pcb.
 
     Sizes use bounding box from (size ...) sexp child; for footprints
     without a (size ...) we approximate from courtyard polyline if any,
     otherwise default 3×3mm.
+    locked_refs lists footprints carrying `(locked yes)` — positions fixed
+    on purpose (mechanical constraints, customer spec); the v2 pipeline
+    recomputes every position and must not run over them.
     """
     sys.path.insert(0, str(SCRIPT_DIR.parent.parent.parent / "check-pcb" / "scripts"))
     from sexp_parser import parse_file
@@ -190,6 +195,7 @@ def extract_pcb_data(pcb_path: Path) -> Tuple[Dict[str, Set[str]],
     fp_nets: Dict[str, Set[str]] = {}
     fp_values: Dict[str, str] = {}
     fp_sizes: Dict[str, Tuple[float, float]] = {}
+    locked_refs: List[str] = []
 
     def visit(node):
         if not isinstance(node, list):
@@ -200,11 +206,14 @@ def extract_pcb_data(pcb_path: Path) -> Tuple[Dict[str, Set[str]],
             nets: Set[str] = set()
             xs: List[float] = []
             ys: List[float] = []
+            locked = False
             for c in node:
                 if not isinstance(c, list):
                     continue
                 head = c[0] if c else None
-                if head == "property" and len(c) >= 3:
+                if head == "locked" and len(c) >= 2 and c[1] == "yes":
+                    locked = True
+                elif head == "property" and len(c) >= 3:
                     if c[1] == "Reference":
                         ref = c[2]
                     elif c[1] == "Value":
@@ -227,6 +236,8 @@ def extract_pcb_data(pcb_path: Path) -> Tuple[Dict[str, Set[str]],
             if ref:
                 fp_nets[ref] = nets
                 fp_values[ref] = value
+                if locked:
+                    locked_refs.append(ref)
                 # Per-class padding: connectors (J*, switches SW*) and TVS-style
                 # parts (D* through-hole) have much larger physical bodies than
                 # the pad bbox suggests — KiCad courtyard typically extends 2-3mm
@@ -257,7 +268,7 @@ def extract_pcb_data(pcb_path: Path) -> Tuple[Dict[str, Set[str]],
             visit(child)
 
     visit(pcb)
-    return fp_nets, fp_values, fp_sizes
+    return fp_nets, fp_values, fp_sizes, locked_refs
 
 
 # Apply via existing helper -----------------------------------------------
@@ -309,7 +320,7 @@ def _call_helper(spec: Dict, timeout: int = 60) -> Dict:
 def _translate_floorplan(fp, dx: float, dy: float):
     """Move a floorplan planned at the origin onto a board that starts
     elsewhere — a fixed outline rarely has its corner at (0,0)."""
-    from .floorplan import Floorplan, Rect, Slot
+    from placement_v2.floorplan import Floorplan, Rect, Slot
     return Floorplan(
         board=Rect(fp.board.x + dx, fp.board.y + dy, fp.board.w, fp.board.h),
         regions={r: Rect(v.x + dx, v.y + dy, v.w, v.h)
@@ -373,9 +384,24 @@ def run_placement_v2(pcb_path: Path,
                   f"{fixed_outline[2]:.1f}×{fixed_outline[3]:.1f}mm "
                   f"at ({fixed_outline[0]:.1f},{fixed_outline[1]:.1f})")
 
-    fp_nets, fp_values, fp_sizes = extract_pcb_data(pcb_path)
+    fp_nets, fp_values, fp_sizes, locked_refs = extract_pcb_data(pcb_path)
     if verbose:
         print(f"[v2] Extracted {len(fp_nets)} footprints")
+
+    # Locked footprints mean "this position is fixed on purpose" (mechanical
+    # constraint, customer spec). The v2 pipeline recomputes EVERY position —
+    # running it would silently move them, which is irreversible damage from
+    # the project's point of view. Refuse; the user unlocks deliberately or
+    # places around them without init_layout.
+    if locked_refs:
+        return {"ok": False,
+                "error": (f"{len(locked_refs)} footprint(s) are locked "
+                          f"({', '.join(sorted(locked_refs)[:10])}"
+                          f"{', …' if len(locked_refs) > 10 else ''}) — "
+                          "init_layout recomputes every position and would "
+                          "move them. Either unlock them in KiCad on purpose, "
+                          "or skip init_layout and place the rest with the "
+                          "toolbox (move) around the locked parts.")}
 
     # ----- Phase A: partition -----
     region_regex = cfg.get("region_regex") or DEFAULT_REGION_REGEX

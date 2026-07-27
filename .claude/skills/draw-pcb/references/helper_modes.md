@@ -22,8 +22,9 @@
 | `refit_board` | .kicad_pcb + margin + `keep_outline` | Edge.Cuts 外框 + 隔离槽缩到 footprint 实际范围 + margin,返回 `fill_ratio`。`keep_outline: true` → 完全不写文件,只按现有板框回报 `fill_ratio`。`refit_board` 工具的底层 |
 | `stitch_zones` | .kicad_pcb + net + 两个层 + pitch | 在**两面填充铜各自内缩(过孔半径+间距)后的交集**内按栅格打过孔,把该网两面缝通;孔另立「孔到孔间距」判据(只判铜会撞进 THT 焊盘的钻孔)。可选往本网大贴片焊盘内打散热孔。**一次一个网**——自动匹配所有 GND 会缝穿隔离屏障。`stitch_zones` 工具的底层 |
 | `set_silk_spec` | .kicad_pcb + 字高 / 线宽 | 全板丝印文字统一到 fab 规格,位号放到所在面丝印层,Value 默认不动。**副作用是预期的**:动过的件与库不一致 → `lib_footprint_issues`;字变大 → `silk_overlap` 涨。`set_silk_spec` 工具的底层 |
+| `place_silk_refs` | .kicad_pcb + passes / gaps / edge_margin | 贪心摆全部可见位号:每件在本体四周候选环(8 向 × 多档间隙 × 横/竖排)里选加权重叠代价最小的位置。代价从高到低:出板/贴 Edge.Cuts(含**内部隔离槽**,每段 Edge.Cuts 图元外扩 `edge_margin_mm` 当禁区;闭合轮廓只取四条周边带,否则整板全禁) > 压 pad > 压别的位号 > 压别家丝印 > 压本体 > 离本体距离。多 pass 重排(先摆的看不见后摆的)。`place_silk_refs` 工具的底层 |
 
-> 上表 13 个就是 `MODES` 全集(与 `_kicad_python_helper.py` 末尾的 dispatch 表一一对应)。
+> 上表 14 个就是 `MODES` 全集(与 `_kicad_python_helper.py` 末尾的 dispatch 表一一对应)。
 > 加 mode 必须同步这张表,否则「改脚本 → 读 helper_modes.md」这条路由会漏掉新能力。
 
 ## Spec 字段约定

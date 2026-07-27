@@ -6,7 +6,7 @@ layer for AI-driven placement. Pure text parsing (s-expressions); no KiCad
 binary, no pcbnew needed.
 
 Output per footprint:
-  ref, value, x, y, angle, layer, type, pad_count,
+  ref, value, footprint (library id), x, y, angle, layer, type, pad_count,
   courtyard {min_x, min_y, max_x, max_y, w, h}   # real component extent
   pads [{number, x, y, w, h, net}]               # absolute board coords,
                                                  # w/h = board-space extent
@@ -64,11 +64,15 @@ _DEGENERATE_MM = 1.0
 
 
 def _courtyard(fp: dict) -> dict | None:
-    """Real component extent. Prefer the courtyard layer; fall back to the
-    pad bounding box when courtyard graphics are absent OR degenerate.
-    A near-zero w/h courtyard would let collisions slip past check_placement
-    (the gate) only for KiCad's own DRC to catch them — so it is rejected
-    and the footprint is flagged `geometry_uncertain` for downstream tools."""
+    """Real component extent, three-level fallback:
+      1. courtyard layer (non-degenerate)      — the library's own declaration
+      2. body graphics (silk/fab/user) ∪ pads  — proxy for the real body
+      3. pad bbox alone                        — flagged `geometry_uncertain`
+    Converted libraries often ship NO CrtYd layer at all. A pad-bbox extent
+    then under-reports the body (worst measured: ~80% short), and KiCad's own
+    courtyard DRC is blind for the same reason — so level 2 closes the gap
+    with graphics every footprint does have. Only level 3, where nothing but
+    pads exists, is flagged uncertain."""
     c = fp.get("courtyard")
     court = None
     if c:
@@ -83,12 +87,24 @@ def _courtyard(fp: dict) -> dict | None:
     if court is not None and not degenerate:
         return court
     pad = _pad_bbox(fp)
+    g = fp.get("graphics_bbox")
+    if g is not None:
+        boxes = [g] + ([pad] if pad else [])
+        merged = {
+            "min_x": round(min(b["min_x"] for b in boxes), 3),
+            "min_y": round(min(b["min_y"] for b in boxes), 3),
+            "max_x": round(max(b["max_x"] for b in boxes), 3),
+            "max_y": round(max(b["max_y"] for b in boxes), 3),
+        }
+        merged["w"] = round(merged["max_x"] - merged["min_x"], 3)
+        merged["h"] = round(merged["max_y"] - merged["min_y"], 3)
+        merged["_from"] = "graphics"
+        return merged
     if pad is not None:
         pad["_from"] = "pad_bbox"
-        if degenerate:
-            # courtyard existed but was a zero-area line — pad bbox is still
-            # smaller than the real body; downstream must treat it as a hint.
-            pad["geometry_uncertain"] = True
+        # No courtyard AND no body graphics — pad bbox is all there is, and
+        # it is smaller than the real body; downstream must treat it as a hint.
+        pad["geometry_uncertain"] = True
         return pad
     if court is not None:
         court["geometry_uncertain"] = True
@@ -119,6 +135,9 @@ def get_geometry(pcb_path: str, refs: set[str] | None = None,
         entry = {
             "ref": ref,
             "value": fp.get("value", ""),
+            # library id names the physical part — the only reliable signal for
+            # "is this a connector" once a board uses non-KiCad refdes habits.
+            "footprint": fp.get("library", ""),
             "x": fp.get("x", 0), "y": fp.get("y", 0),
             "center": center,
             "angle": fp.get("angle", 0),
@@ -129,8 +148,8 @@ def get_geometry(pcb_path: str, refs: set[str] | None = None,
             "nets": nets,
         }
         if court and court.get("geometry_uncertain"):
-            # courtyard was degenerate — extent is a pad-bbox guess, smaller
-            # than the real body. check_placement surfaces this as a warning.
+            # no courtyard and no body graphics — extent is a pad-bbox guess,
+            # smaller than the real body. check_placement warns on these.
             entry["geometry_uncertain"] = True
         if with_pads:
             # w/h are the BOARD-SPACE extent, not the library size: a pad on a

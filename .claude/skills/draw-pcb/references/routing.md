@@ -1,5 +1,8 @@
 # Phase E — 自动布线(KiCadRoutingTools / KRT)
 
+**目录**:KRT 是什么 · 一次性构建 · 用法 · 为什么先剥铜再布线 · 铁律 · Phase E 退出条件 · 已知点
+—— **退出条件 / 铁律 / 逐网配方 flag 都在文件后半段,别只读前 100 行。**
+
 draw-pcb 的可选收尾阶段:把通过 route-ready 验收的布局板自动布线成全连通 + DRC 干净的成品板。
 
 ## KRT 是什么
@@ -96,8 +99,11 @@ zone),留着对布线**零收益**;但 `filter_already_routed` 会把 zone 当�
 2. 重铺铜已复现 Phase D 用过的**每一个** `(net, layer)` 组合(见 `copper_pour.md`)。
 3. `run_drc`(重铺之后跑)`violation_count = 0`。
 4. 同一次 `run_drc` 的 `unconnected_count = 0`——非 0 通常是 GND 铜被切成孤岛,
-   补 stitching via,别当噪音忽略。
+   补 stitching via(工具:`stitch_zones`,双层板重铺后就该跑,见 `tools.md`),别当噪音忽略。
 5. `check_zones` 退出码 0——重铺后的铜仍然没跨隔离屏障。
+6. 凡配方声明了约束——等长组 / 过孔预算 / 线宽下限——`net_metrics` 量过且达标
+   (delta / 过孔数 / 实际线宽)。**「我传了参数」不是证据,量出来的数才是**:
+   等长蛇形塞不进通道时会静默不动,工具不报错(见 `routing_strategy.md`)。
 
 **轮次上限:换配方重布最多 3 轮**(每轮从 placement 原件重来,见铁律 3/4)。到顶仍不过 →
 停,打印剩余项 + 每轮试过的配方交用户,别无限换参数。
@@ -111,4 +117,4 @@ zone),留着对布线**零收益**;但 `filter_already_routed` 会把 zone 当�
 | 已铺铜的 GND 网被 KRT **整网跳过不布** | **`route` 默认剥铜已经堵掉这条**(见上「为什么先剥铜」)。根因:KRT `filter_already_routed` 判「已连」用的是 zone **外框**包含 pad(`check_connected.py` → `zone.polygon`,parser 取第一个 `(pts)` = outline,**不是 filled_polygon**)。同层 GND pad 落在外框内就判已连 → 不布 → 重铺后铜被走线切碎,那个 pad 落到孤岛上 → 真没连。**只有加了 `--keep-zones` 才会重现**,那时必须查 `unconnected` 并手工补 stitching via |
 | GND 被布成一堆细走线 | 剥铜后的**预期行为**,不是 bug:KRT 不知道待会儿要铺铜,会老老实实布 GND(布通的 pad 和 via 都会明显多于留铜时)。这些走线跟后铺的铜同网,重铺时合并,无害;换来的是 0 孤岛 |
 | 隔离槽 = Edge.Cuts 内部 cutout | KRT 尊重内部 cutout + 板边,走线不会穿隔离槽 |
-| **细间距连接器的网怎么都布不通**,日志是 `ALL neighbors blocked` + `Re-route FAILED: no rippable blockers found`,而且**迭代数一上来就撞 5001 上限** | **这不是拥塞,是焊盘出线口本身放不下线,换任何配方都无解**。已实测排除的手段:换 `--ordering` 三种、`--grid-step` 0.1→0.05、先布该网(空板第一遍照样失败)、rip-up(报"没有可拆的阻挡物")。先量一眼几何再动手:`get_geometry` 读该连接器同排相邻焊盘的**净间距**,若它 < 2×安全间距,横向根本穿不过去(实测一颗 0.5mm 间距 USB-C:相邻焊盘净间距 0.2mm,而安全间距 0.2032mm)。**兜底路径**:在 KiCad GUI 手工给这几个网做扇出,然后重跑 `route`(**不传 `--nets`**)布其余——KRT 会跳过已布通的网,手布的走线原样保留(见 `routing_strategy.md`「布线顺序」的两遍法实测)。收尾用 `net_metrics.py` 点名还剩哪些网没布,别靠"看图像布通了"下结论 |
+| **细间距连接器的网怎么都布不通**,日志是 `ALL neighbors blocked` + `Re-route FAILED: no rippable blockers found`,而且**迭代数一上来就撞 5001 上限** | **先算几何预算,别判死刑**——这个症状多数是「配方超出出线几何」,单换一个旋钮看不出来,曾被误判成"无解"(实测同一颗 0.5mm 间距 USB-C,三个旋钮各自都能决定成败,配齐后全布通)。用 `get_geometry` 量目标排:相邻异网焊盘**中心距 P**、焊盘沿排方向**宽 W**,加上配方的**线宽 T**、**安全间距 C**,两条几何判据:①**出线**(沿本焊盘中心线向外)要求 `T ≤ 2·(P − W/2 − C)`;②**从两焊盘之间横穿**要求 净间距 `(P − W) ≥ T + 2C`,不满足②只是不能横穿,不等于不能出线。然后**逐个旋钮 A/B,一次只动一个**:1) T 超预算 → 降线宽(有线宽下限约束的网先把冲突摆给用户);2) C 超预算(公式解出 T≤0)→ 降到设计规则下限;3) 预算余量 < `--grid-step` 的一半 → 降栅格(焊盘中心不落栅格时出线口最多偏半格,默认 0.1 就偏 0.05);4) `--nets` 抢网第一遍失败 → 未布网的 stub 预留在堵出线口,见 `routing_strategy.md`「布线顺序」。⚠ 两条铁律:**KRT 的实际上限比几何上限更严**(内部另有余量),几何合法 ≠ KRT 能布、KRT 布不了 ≠ 几何非法,给用户要分开报告这两件事;**差分对两根必须同一遍一起布**,拆开布先到的会把后到的逼去绕远路。全试过仍失败才走**兜底路径**:在 KiCad GUI 手工给这几个网做扇出,然后重跑 `route`(**不传 `--nets`**)布其余——KRT 会跳过已布通的网,手布的走线原样保留(见 `routing_strategy.md`「布线顺序」的两遍法实测)。收尾用 `net_metrics.py` 点名还剩哪些网没布,别靠"看图像布通了"下结论 |
