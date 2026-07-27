@@ -7,7 +7,7 @@
 ![KiCad 10](https://img.shields.io/badge/KiCad-10-blue)
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-blue)
 ![Runtime: Claude Code only](https://img.shields.io/badge/runtime-Claude%20Code%20only-orange)
-![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey)
+![Platform: macOS tested, Linux untested](https://img.shields.io/badge/platform-macOS%20tested%20%7C%20Linux%20untested-lightgrey)
 
 **Describe the board you want. Get back a KiCad project and a fab-ready Gerber package** — with every part
 checked against live distributor stock, and every stage cleared by scripts, SPICE and DRC rather than by the
@@ -37,10 +37,13 @@ You:  I need an isolated 400 V DC-bus voltage sensor — 0–3.3 V out to an MCU
 
 You are never locked into that sequence — every step is a toolbox you can run, redo, hand-edit or skip.
 
-### Before you read on — two hard limits
+### Before you read on — two things to know
 
-1. **macOS + KiCad 10.** The skills call `kicad-cli` and KiCad's bundled `pcbnew` Python API directly, so the
-   pipeline is macOS-only today.
+1. **KiCad 10 is required, and macOS is the only platform this has been tested on.** The skills call
+   `kicad-cli` and KiCad's bundled `pcbnew` Python API directly. Linux is wired up but unverified — the
+   interpreter probe includes `/usr/lib/kicad/python3`, and `kicad-cli` resolution covers Flatpak, Snap and
+   Nix. Windows is the real gap: `kicad-cli` resolves there, but no `pcbnew` interpreter path ships, so the
+   board-writing steps in `draw-pcb` have nothing to call. Details in [Prerequisites](#prerequisites).
 2. **Part selection ships for two locales — Japan and mainland China.** That is Phase 2 alone; *every other
    phase is locale-neutral and runs anywhere*. Elsewhere you either adapt one of the two shipped selection
    skills to your distributors (they are thin shells over a shared engine) or pick parts by hand and feed the
@@ -225,7 +228,10 @@ Details in [`component-preparing/references/bom_lifecycle.md`](.claude/skills/co
 
 ### Prerequisites
 
-- **macOS** with **[KiCad 10](https://www.kicad.org/download/)** installed — skills call `kicad-cli` and KiCad's bundled `pcbnew` Python API (no MCP). Default install is `/Applications/KiCad/KiCad.app`; if KiCad lives elsewhere, just make sure `kicad-cli` is on `PATH` (scripts probe the standard install paths first, then fall back to `PATH`). (`KICAD_ROOT` is unrelated — it overrides the *project workspace root*, not the KiCad install location.)
+- **[KiCad 10](https://www.kicad.org/download/)**, on **macOS** — the only tested platform. Skills call `kicad-cli` and KiCad's bundled `pcbnew` Python API (no MCP), and each is located differently:
+  - `kicad-cli` — `PATH` first, then per-platform install locations: macOS app bundle + Homebrew, Linux Flatpak/Snap/Nix, Windows Program Files/Chocolatey/MSYS2. Putting `kicad-cli` on `PATH` satisfies this anywhere.
+  - **`pcbnew` interpreter** — probed only at KiCad's bundled Python: `/Applications/KiCad/KiCad.app/…/Python.framework/…` (macOS) and `/usr/lib/kicad/python3` (Linux). **No Windows path ships**, so `draw-pcb`'s board-writing steps find no interpreter there. Linux has a path but has never been run.
+  - (`KICAD_ROOT` is unrelated — it overrides the *project workspace root*, not the KiCad install location.)
 - **Python 3.12** (3.13 / 3.14 are not supported).
 - **[ngspice](https://ngspice.sourceforge.io/)** on `PATH` — `check-schematic`'s subcircuit simulation is ngspice-only (`brew install ngspice`); `check-pcb`'s parasitic / PDN SPICE also accepts LTspice or Xyce, auto-detected. Without a simulator neither fails — the SPICE steps are skipped and marked as such in the report.
 - API keys — **locale-dependent**: the **Japan** pipeline needs at minimum a free [DigiKey developer](https://developer.digikey.com/) account; the **China-mainland** pipeline needs **no keys at all**. See [External APIs](#external-apis) for the full list of services and what each does.
@@ -309,7 +315,7 @@ upstream repo — drop those two lines in your fork or the symlinks will not be 
 **What to expect.** Skill *discovery* ports cleanly: with the symlink above, Codex lists all eleven skills (the ten pipeline skills plus `setup`).
 Skill *execution* is a different question and is **untested** — the skills shell out to `kicad-cli`, the
 project venv and distributor REST APIs, and agents differ in how they sandbox commands and network access.
-Also note the pipeline itself is macOS-only (KiCad paths), and symlinks need Developer Mode on Windows.
+Also note the pipeline itself is only tested on macOS, and symlinks need Developer Mode on Windows.
 Treat a port as your own experiment; issues filed against non-Claude-Code runtimes will be closed.
 
 ---

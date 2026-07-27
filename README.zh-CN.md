@@ -7,7 +7,7 @@
 ![KiCad 10](https://img.shields.io/badge/KiCad-10-blue)
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-blue)
 ![Runtime: Claude Code only](https://img.shields.io/badge/运行环境-仅%20Claude%20Code-orange)
-![Platform: macOS](https://img.shields.io/badge/平台-macOS-lightgrey)
+![Platform: macOS tested, Linux untested](https://img.shields.io/badge/平台-macOS%20已测%20%7C%20Linux%20未测-lightgrey)
 
 **说出你想要的板子，拿回一个 KiCad 工程和一套可直接下厂的 Gerber** —— 每一个元件都对着分销商实时库存核过，
 每一个阶段都由脚本、SPICE 和 DRC 判过，而不是听模型自己说「没问题」。
@@ -36,10 +36,12 @@ Gerber 出货的完整链路。
 
 你不会被这个顺序绑死——每一步都是可以单独跑、重跑、手改或跳过的工具盒。
 
-### 往下读之前：一条硬约束，一个好消息
+### 往下读之前：两件事先说清楚
 
-1. **硬约束：只支持 macOS + KiCad 10。** skill 直接调 `kicad-cli` 和 KiCad 自带的 `pcbnew` Python API，
-   所以目前只能在 macOS 上跑。
+1. **硬性依赖 KiCad 10；平台只在 macOS 上测过。** skill 直接调 `kicad-cli` 和 KiCad 自带的 `pcbnew`
+   Python API。Linux 的路径代码里铺好了但没验证过 —— 解释器探测表含 `/usr/lib/kicad/python3`，
+   `kicad-cli` 定位覆盖 Flatpak、Snap、Nix。真正的缺口是 Windows：`kicad-cli` 找得到，但没有
+   `pcbnew` 解释器路径，`draw-pcb` 里改写板文件那几步没有解释器可调。细节见[前置条件](#前置条件)。
 2. **好消息：国内开箱可用，一把 API key 都不用申请。** 选品阶段（Phase 2）的中国大陆通道走
    LCSC jlcsearch + jlcparts 公开数据分片，**零 key、零注册**。日本通道走 DigiKey + Mouser + LCSC
    三路并行（需要一个免费 DigiKey key）。**选品是唯一跟地区绑定的阶段**，其余所有 phase 与地区无关。
@@ -222,7 +224,10 @@ PCB-Agent-Teams/
 
 ### 前置条件
 
-- **macOS** 且装了 **[KiCad 10](https://www.kicad.org/download/)** —— skill 调用 `kicad-cli` 和 KiCad 自带的 `pcbnew` Python API（不走 MCP）。默认安装路径是 `/Applications/KiCad/KiCad.app`；装在别处的话，保证 `kicad-cli` 在 `PATH` 上即可（脚本先探标准安装路径，再 fallback 到 `PATH`）。（`KICAD_ROOT` 跟这个无关 —— 它覆盖的是*项目工作区根目录*，不是 KiCad 安装位置。）
+- **[KiCad 10](https://www.kicad.org/download/)**，跑在 **macOS** 上 —— 唯一测过的平台。skill 调用 `kicad-cli` 和 KiCad 自带的 `pcbnew` Python API（不走 MCP），两者的定位方式不一样：
+  - `kicad-cli` —— 先查 `PATH`，再按平台探标准安装位置：macOS app bundle + Homebrew，Linux Flatpak/Snap/Nix，Windows Program Files/Chocolatey/MSYS2。把 `kicad-cli` 放进 `PATH` 在哪个平台都够用。
+  - **`pcbnew` 解释器** —— 只在 KiCad 自带的 Python 上探：`/Applications/KiCad/KiCad.app/…/Python.framework/…`（macOS）和 `/usr/lib/kicad/python3`（Linux）。**没有 Windows 路径**，所以 `draw-pcb` 改写板文件那几步在 Windows 上找不到解释器。Linux 有路径，但从没跑过。
+  - （`KICAD_ROOT` 跟这个无关 —— 它覆盖的是*项目工作区根目录*，不是 KiCad 安装位置。）
 - **Python 3.12**（不支持 3.13 / 3.14）。
 - **[ngspice](https://ngspice.sourceforge.io/)** 在 `PATH` 上 —— `check-schematic` 的子电路仿真只认 ngspice（`brew install ngspice`）；`check-pcb` 的寄生 / PDN SPICE 也接受 LTspice 或 Xyce，自动探测。没有仿真器两者都不会失败 —— SPICE 步骤会跳过，并在报告里如实标注。
 - API key —— **取决于地区**：**日本**流水线最少需要一个免费 [DigiKey developer](https://developer.digikey.com/) 账号；**中国大陆**流水线**完全不需要 key**。完整服务清单和各自作用见 [外部 API](#外部-api)。
@@ -296,7 +301,7 @@ mkdir -p .agents && ln -s ../.claude/skills .agents/skills   # Codex；路径按
 
 注意 `.gitignore` 刻意排除了 `AGENTS.md` 和 `.agents/`，为的是不让外来脚手架进上游仓库 —— 在你的 fork 里删掉那两行，否则软链不会被提交。
 
-**能期待什么。** skill *发现*能干净移植：加上上面的软链，Codex 能列出全部十一个 skill。skill *执行*是另一回事，而且**未经测试** —— skill 会 shell out 调 `kicad-cli`、项目 venv 和分销商 REST API，各 agent 沙箱命令与网络访问的方式不同。另外流水线本身只支持 macOS（KiCad 路径），Windows 上软链需要开发者模式。移植请当成你自己的实验；针对非 Claude Code 运行环境提的 issue 会被关闭。
+**能期待什么。** skill *发现*能干净移植：加上上面的软链，Codex 能列出全部十一个 skill。skill *执行*是另一回事，而且**未经测试** —— skill 会 shell out 调 `kicad-cli`、项目 venv 和分销商 REST API，各 agent 沙箱命令与网络访问的方式不同。另外流水线本身只在 macOS 上测过，Windows 上软链需要开发者模式。移植请当成你自己的实验；针对非 Claude Code 运行环境提的 issue 会被关闭。
 
 ---
 
