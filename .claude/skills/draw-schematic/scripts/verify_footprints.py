@@ -35,13 +35,32 @@ from typing import Dict, List, Optional, Tuple
 # Footprint 库搜索路径（硬编码，跨平台）
 # ============================================================
 
+# Tried newest-first — matches the vendored KiCadRoutingTools/install_plugin.py
+# precedent so a KiCad 9.x install isn't left unsupported by an assumed-10.0 path.
+_KICAD_WINDOWS_VERSIONS = ["10.0", "9.99", "9.0"]
+
+
+def _windows_kicad_paths(suffix: str) -> list:
+    """`suffix` e.g. `share\\kicad\\footprints`. Checks %ProgramFiles% /
+    %ProgramFiles(x86)% / %ProgramW6432% first (the common case — avoids a
+    26-drive-letter stat sweep, including any offline/disconnected mapped
+    drives, on every call) before falling back to a full C-Z scan for a
+    custom-drive install."""
+    import os
+    roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    fast = [f"{r}\\KiCad\\{ver}\\{suffix}" for r in roots if r for ver in _KICAD_WINDOWS_VERSIONS]
+    scan = [f"{d}:\\Program Files{x86}\\KiCad\\{ver}\\{suffix}"
+            for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" for x86 in ("", " (x86)")
+            for ver in _KICAD_WINDOWS_VERSIONS]
+    return fast + scan
+
+
 _KICAD_FP_DIRS = [
     "/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints",  # macOS
     "/usr/share/kicad/footprints",                                       # Linux apt
     "/usr/local/share/kicad/footprints",                                 # Linux compile
     "/snap/kicad/current/share/kicad/footprints",                        # Linux snap
-    r"C:\Program Files\KiCad\10.0\share\kicad\footprints",               # Windows
-]
+] + _windows_kicad_paths(r"share\kicad\footprints")
 
 _LIB_EXTERNAL = Path(__file__).resolve().parents[4] / "lib_external"
 
@@ -222,10 +241,24 @@ def _kw_value(kw_value: ast.AST, const_map: Dict[str, object]) -> Optional[objec
     return None
 
 
+# Component() kwargs whose spelling doesn't match its dict key 1:1 — these are
+# the properties inject_mpn_props.py writes back onto generic passives once
+# component-preparing has a verified MPN (silk `value` stays the electrical
+# quantity per passive_value_rule.md; the real MPN rides along as a property
+# instead). Without this map the AST walk below silently drops them, so
+# anything downstream that reads `mpn_prop` — the real purchasable part number,
+# as opposed to `value` which for generics is "82k"/"100nF"/etc, not an MPN —
+# would silently regress back to seeing only the electrical-quantity value.
+_EXTRA_KW_MAP = {"MPN": "mpn_prop", "Manufacturer": "manufacturer_prop",
+                  "Datasheet": "datasheet_prop"}
+
+
 def extract_components_from_py(py_file: Path) -> List[Dict]:
     """AST 解析 .py，找所有 Component(symbol=..., ref=..., value=..., footprint=...)。
 
-    返回 [{ref, value, footprint, symbol, line}]
+    返回 [{ref, value, footprint, symbol, mpn_prop, manufacturer_prop,
+           datasheet_prop, line}] — the last three are None unless
+    inject_mpn_props.py (or a hand-written Component() call) set them.
     """
     text = py_file.read_text()
     tree = ast.parse(text)
@@ -242,14 +275,16 @@ def extract_components_from_py(py_file: Path) -> List[Dict]:
             continue
         d: Dict[str, Optional[str]] = {
             "ref": None, "value": None, "footprint": None, "symbol": None,
+            "mpn_prop": None, "manufacturer_prop": None, "datasheet_prop": None,
             "line": node.lineno,
         }
         for kw in node.keywords:
-            if kw.arg not in d:
+            key = kw.arg if kw.arg in d else _EXTRA_KW_MAP.get(kw.arg)
+            if key is None:
                 continue
             resolved = _kw_value(kw.value, const_map)
             if resolved is not None:
-                d[kw.arg] = resolved
+                d[key] = resolved
         if d["footprint"]:
             out.append(d)
     return out

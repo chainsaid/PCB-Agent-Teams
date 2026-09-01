@@ -71,6 +71,21 @@ def test_transform_to_lcsc_columns_and_values():
     assert rows[0]["Quantity"] == "1"
 
 
+def test_transform_to_lcsc_extracts_part_number_from_vendor_url():
+    """Vendor_Url already carries the LCSC product ID (component-selecting/
+    component-preparing evidence's vendor.url) — the column shouldn't be left
+    blank when it's sitting right there, forcing the user to click through
+    and read it off the URL themselves."""
+    rows = transform_to_lcsc([{
+        "Qty": "1", "Refs": "R1", "MPN": "FRC1206F8202TS", "Category": "generic",
+        "Footprint": "R_1206_3216Metric", "Vendor_Status": "active",
+        "Vendor_Stock": "22975",
+        "Vendor_Url": "https://www.lcsc.com/product-detail/2960747.html",
+        "Datasheet": "",
+    }])
+    assert rows[0]["LCSC Part #"] == "C2960747"
+
+
 def test_round_trip_through_csv_writer(tmp_path):
     out = tmp_path / "digikey_bulk.csv"
     rows = transform_to_digikey(SAMPLE_BOM)

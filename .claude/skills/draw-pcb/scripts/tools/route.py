@@ -156,11 +156,22 @@ def main() -> int:
         print(json.dumps({"ok": False,
                           "error": f"KRT not vendored at {KRT_DIR}"}))
         return 1
-    rust_so = KRT_DIR / "rust_router" / "grid_router.so"
-    if not rust_so.exists():
+    # The compiled extension can land in either the rust_router/ build dir or
+    # KRT_DIR itself (where a downloaded release asset gets dropped), and its
+    # extension is platform-specific (.so on Linux/macOS, .pyd on Windows,
+    # sometimes .abi3.so for abi3 wheels) — check every combination rather
+    # than assuming the Unix .so name, which is wrong on every Windows box.
+    _candidates = [
+        d / f"grid_router{ext}"
+        for d in (KRT_DIR / "rust_router", KRT_DIR)
+        for ext in (".so", ".pyd", ".abi3.so")
+    ]
+    if not any(c.exists() for c in _candidates):
         print(json.dumps({"ok": False, "error":
-                          "grid_router.so missing — run "
-                          "vendor/KiCadRoutingTools/build_router.py first"}))
+                          "grid_router native module missing — run "
+                          "vendor/KiCadRoutingTools/build_router.py first, "
+                          "or drop a matching prebuilt grid_router.pyd/.so "
+                          "release asset into vendor/KiCadRoutingTools/"}))
         return 1
     if args.power_nets_widths and not args.power_nets:
         print(json.dumps({"ok": False, "error":

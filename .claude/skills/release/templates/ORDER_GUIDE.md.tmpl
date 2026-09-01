@@ -11,10 +11,10 @@
 | 板尺寸 | {{ board.size_mm }} |
 | 元件数 | {{ board.n_components }}（其中 SMT {{ board.n_smt }}，THT {{ board.n_tht }}） |
 | 唯一 MPN 数 | {{ coverage.n_unique_mpn }} |
-| Gerber 文件 ✓ | pcb_fab/{{ project }}_fab.zip |
-| 生产 BOM ✓ | pcb_fab/assembly_bom.csv |
+| Gerber 文件 ✓ | pcb_fab/{{ pcb_stem }}_fab.zip |
+| 生产 BOM ✓ | pcb_fab/assembly/{{ pcb_stem }}_assembly_bom.csv |
 | 采购 BOM ✓ | procurement/bom_{{ project }}.csv |
-| check-pcb gate | {{ gate.status }} @ {{ gate.timestamp }} |
+| BOM readiness gate | {{ gate.status }} @ {{ gate.timestamp }}（component-preparing sentinel；check-pcb 本身还没有独立机读 verdict 文件）|
 
 ---
 
@@ -41,19 +41,19 @@
 **当前覆盖率**：LCSC {{ coverage.single_vendor_coverage.lcsc }} {% if "lcsc" in coverage.recommended_paths %}✅ 推荐{% else %}⚠ 不全{% endif %}
 **步骤**：
 1. 浏览器打开 https://cart.jlcpcb.com/quote
-2. 上传 `pcb_fab/{{ project }}_fab.zip`
+2. 上传 `pcb_fab/{{ pcb_stem }}_fab.zip`
 3. 启用 "PCB Assembly"
-4. 上传生产 BOM：`pcb_fab/assembly_bom.csv`
-5. 上传 CPL：`pcb_fab/{{ project }}_positions.csv`
+4. 上传生产 BOM：`pcb_fab/assembly/{{ pcb_stem }}_assembly_bom.csv`
+5. 上传 CPL：`pcb_fab/assembly/{{ pcb_stem }}_positions.csv`
 6. 工艺参数：板厚 {{ board.thickness_mm }} mm / 铜厚 1 oz / 阻焊绿 / 丝印白（详见 `fab_options.md`）
 
 ### Path B：PCBWay turnkey（PCB + 全球采购装配）
 **适合**：元件分散在 DigiKey/Mouser，LCSC 覆盖不全
 **步骤**：
 1. https://www.pcbway.com/orderonline.aspx
-2. 上传 `pcb_fab/{{ project }}_fab.zip`
+2. 上传 `pcb_fab/{{ pcb_stem }}_fab.zip`
 3. Quote Assembly → 上传 `procurement/bom_{{ project }}.csv`（PCBWay 接受全球 MPN）
-4. CPL：`pcb_fab/{{ project }}_positions.csv`
+4. CPL：`pcb_fab/assembly/{{ pcb_stem }}_positions.csv`
 
 ### Path C：PCB 独打 + 元件自买（最便宜，但要自己焊）
 PCB 走 Path A 但**不勾装配**。元件按以下任一 distributor 下：

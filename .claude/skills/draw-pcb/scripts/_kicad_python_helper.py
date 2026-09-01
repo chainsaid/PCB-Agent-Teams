@@ -1968,6 +1968,12 @@ def mode_set_silk_spec(spec):
         back = fp.GetLayer() != pcbnew.F_Cu
         ref = fp.Reference()
         ref.SetLayer(pcbnew.B_SilkS if back else pcbnew.F_SilkS)
+        # apply_layout's default hides every ref-des to dodge silk_over_copper
+        # on dense auto-placed boards (see mode_apply_layout's keep_silk_refs
+        # flag, off by default). This mode's whole job is making ref-des print
+        # correctly — a hidden one formatted to spec still prints nothing, so
+        # unhide unconditionally here rather than silently no-op'ing on it.
+        ref.SetVisible(True)
         apply(ref)
         refs += 1
         val = fp.Value()

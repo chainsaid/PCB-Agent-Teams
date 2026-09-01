@@ -5,11 +5,32 @@ bundled Python (not the workspace .venv). This module locates that interpreter
 and invokes _kicad_python_helper.py as a subprocess.
 """
 import json
+import os
 import subprocess
 import tempfile
 from pathlib import Path
 
 _HELPER = Path(__file__).resolve().parent.parent / "_kicad_python_helper.py"
+
+# Tried newest-first — matches the vendored KiCadRoutingTools/install_plugin.py
+# precedent so a KiCad 9.x install isn't left unsupported by an assumed-10.0 path.
+_KICAD_WINDOWS_VERSIONS = ["10.0", "9.99", "9.0"]
+
+
+def _windows_kicad_candidates() -> list[str]:
+    """KiCad's Windows installer lets the user pick any drive, so scan them
+    all rather than assuming C: (e.g. `D:\\Program Files\\KiCad\\10.0\\...`).
+    Checks %ProgramFiles%/%ProgramFiles(x86)%/%ProgramW6432% first (the
+    common case — avoids a 26-drive stat sweep, including any
+    offline/disconnected mapped drives, on every call)."""
+    exe_name = "python.exe"
+    roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    fast = [f"{r}\\KiCad\\{ver}\\bin\\{exe_name}" for r in roots if r for ver in _KICAD_WINDOWS_VERSIONS]
+    subpaths = [rf"Program Files\KiCad\{ver}\bin\{exe_name}" for ver in _KICAD_WINDOWS_VERSIONS] + \
+               [rf"Program Files (x86)\KiCad\{ver}\bin\{exe_name}" for ver in _KICAD_WINDOWS_VERSIONS]
+    scan = [f"{d}:\\{sub}" for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" for sub in subpaths]
+    return fast + scan
+
 
 _KICAD_PYTHON_CANDIDATES = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/"
@@ -17,7 +38,7 @@ _KICAD_PYTHON_CANDIDATES = [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/"
     "Versions/3.9/bin/python3.9",
     "/usr/lib/kicad/python3",
-]
+] + _windows_kicad_candidates()
 
 
 def find_kicad_python() -> str | None:

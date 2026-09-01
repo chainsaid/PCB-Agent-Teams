@@ -23,13 +23,63 @@ Public API:
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
+import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.request
+
+# fcntl is Unix-only; Windows has no equivalent module, only msvcrt's
+# byte-range locking. Wrap both behind a tiny cross-platform lock/unlock
+# pair so the flock() call sites below don't need to branch.
+if sys.platform == "win32":
+    import msvcrt
+    import time as _time
+
+    # msvcrt.locking(LK_LOCK) is not a blocking wait like fcntl.flock(LOCK_EX)
+    # — it internally retries for ~10s and then raises OSError. A bare
+    # `except OSError: pass` here would silently proceed WITHOUT the lock,
+    # which defeats the entire point of this module under real contention
+    # (two sub-agents racing the same host's throttle state can both read a
+    # stale `last_call` and fire simultaneously, blowing the vendor's rate
+    # limit this file exists to enforce). Keep retrying past msvcrt's own
+    # ~10s window — bounded, not infinite, so a genuinely stuck holder still
+    # surfaces — instead of giving up on the first internal timeout.
+    _LOCK_MAX_WAIT_S = 30.0
+
+    def _flock_exclusive(f) -> None:
+        f.seek(0)
+        deadline = _time.monotonic() + _LOCK_MAX_WAIT_S
+        while True:
+            try:
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                if _time.monotonic() >= deadline:
+                    print(f"⚠ throttle lock not acquired after {_LOCK_MAX_WAIT_S:.0f}s "
+                          "— proceeding WITHOUT it (another process may be stuck "
+                          "holding it); throttling may be inaccurate this call",
+                          file=sys.stderr)
+                    return
+                _time.sleep(0.2)
+
+    def _funlock(f) -> None:
+        try:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+else:
+    import fcntl
+
+    def _flock_exclusive(f) -> None:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+
+    def _funlock(f) -> None:
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -56,9 +106,15 @@ _DEFAULT_INTERVAL = 0.6  # fallback for unknown hosts
 # Retry schedule for transient burst limit / 503. Total max wait ~21s.
 RETRY_DELAYS_S = (3.0, 6.0, 12.0)
 
-# Cross-process state file. fcntl flock guarantees only one writer at a time.
-# Survives across sub-agents started by the same user on the same machine.
-_STATE_FILE = "/tmp/api_throttle.json"
+# Cross-process state file. flock (fcntl on Unix, msvcrt on Windows) guarantees
+# only one writer at a time. Survives across sub-agents started by the same
+# user on the same machine — which is why this stays a fixed, well-known path
+# rather than tempfile.gettempdir() on macOS/Linux (gettempdir() there reads
+# $TMPDIR, which can differ between independently-spawned shell sessions,
+# unlike the single shared /tmp). Windows has no /tmp at all, so it's the one
+# platform that must fall back to gettempdir().
+_STATE_FILE = (os.path.join(tempfile.gettempdir(), "api_throttle.json")
+                if sys.platform == "win32" else "/tmp/api_throttle.json")
 
 # In-process locks (cheap path before fcntl).
 _THREAD_LOCK = threading.Lock()
@@ -111,7 +167,7 @@ def _mark_dead_until(host: str, until_epoch: float, reason: str) -> None:
     DailyQuotaExhausted until the time passes."""
     with _THREAD_LOCK:
         with open(_STATE_FILE, "a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            _flock_exclusive(f)
             try:
                 f.seek(0)
                 try:
@@ -127,7 +183,7 @@ def _mark_dead_until(host: str, until_epoch: float, reason: str) -> None:
                 f.truncate()
                 f.write(json.dumps(state))
             finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                _funlock(f)
 
 
 def _wait_for_host_slot(host: str) -> None:
@@ -137,7 +193,7 @@ def _wait_for_host_slot(host: str) -> None:
     interval = _interval_for(host)
     with _THREAD_LOCK:
         with open(_STATE_FILE, "a+") as f:
-            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            _flock_exclusive(f)
             try:
                 f.seek(0)
                 try:
@@ -168,7 +224,7 @@ def _wait_for_host_slot(host: str) -> None:
                 f.truncate()
                 f.write(json.dumps(state))
             finally:
-                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                _funlock(f)
 
 
 def _classify_429(exc: urllib.error.HTTPError) -> tuple[str, float]:

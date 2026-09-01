@@ -37,13 +37,32 @@ from _helpers.register_ksa import register as _register_ksa  # noqa: E402
 _register_ksa()
 
 
+# Tried newest-first — matches the vendored KiCadRoutingTools/install_plugin.py
+# precedent so a KiCad 9.x install isn't left unsupported by an assumed-10.0 path.
+_KICAD_WINDOWS_VERSIONS = ["10.0", "9.99", "9.0"]
+
+
+def _windows_kicad_paths(suffix: str) -> list:
+    """`suffix` e.g. `share\\kicad\\symbols\\power.kicad_sym`. Checks
+    %ProgramFiles% / %ProgramFiles(x86)% / %ProgramW6432% first (the common
+    case — avoids a 26-drive-letter stat sweep, including any
+    offline/disconnected mapped drives, on every call) before falling back
+    to a full C-Z scan for a custom-drive install."""
+    import os
+    roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    fast = [f"{r}\\KiCad\\{ver}\\{suffix}" for r in roots if r for ver in _KICAD_WINDOWS_VERSIONS]
+    scan = [f"{d}:\\Program Files{x86}\\KiCad\\{ver}\\{suffix}"
+            for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" for x86 in ("", " (x86)")
+            for ver in _KICAD_WINDOWS_VERSIONS]
+    return fast + scan
+
+
 # PWR_FLAG 库文件位置（KiCad 自带）
 _KICAD_POWER_LIB_CANDIDATES = [
     "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols/power.kicad_sym",
     "/usr/share/kicad/symbols/power.kicad_sym",
     "/usr/local/share/kicad/symbols/power.kicad_sym",
-    r"C:\Program Files\KiCad\10.0\share\kicad\symbols\power.kicad_sym",
-]
+] + _windows_kicad_paths(r"share\kicad\symbols\power.kicad_sym")
 
 
 def _find_power_lib() -> Path:

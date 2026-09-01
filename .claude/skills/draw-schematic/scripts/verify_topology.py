@@ -31,7 +31,41 @@ from collections import defaultdict
 from pathlib import Path
 
 
-KICAD_CLI = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
+# Tried newest-first — matches the vendored KiCadRoutingTools/install_plugin.py
+# precedent so a KiCad 9.x install isn't left unsupported by an assumed-10.0 path.
+_KICAD_WINDOWS_VERSIONS = ["10.0", "9.99", "9.0"]
+
+
+def _windows_kicad_paths(suffix: str) -> list:
+    """`suffix` e.g. `bin\\kicad-cli.exe`. Checks %ProgramFiles% /
+    %ProgramFiles(x86)% / %ProgramW6432% first (the common case — avoids a
+    26-drive-letter stat sweep, including any offline/disconnected mapped
+    drives, on every call) before falling back to a full C-Z scan for a
+    custom-drive install."""
+    import os
+    roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    fast = [f"{r}\\KiCad\\{ver}\\{suffix}" for r in roots if r for ver in _KICAD_WINDOWS_VERSIONS]
+    scan = [f"{d}:\\Program Files{x86}\\KiCad\\{ver}\\{suffix}"
+            for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" for x86 in ("", " (x86)")
+            for ver in _KICAD_WINDOWS_VERSIONS]
+    return fast + scan
+
+
+def _find_kicad_cli() -> str:
+    candidates = [
+        "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
+        "/usr/bin/kicad-cli",
+        "/usr/local/bin/kicad-cli",
+        "/snap/kicad/current/bin/kicad-cli",
+    ] + _windows_kicad_paths(r"bin\kicad-cli.exe")
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    import shutil
+    return shutil.which("kicad-cli") or candidates[0]
+
+
+KICAD_CLI = _find_kicad_cli()
 
 
 # ============================================================

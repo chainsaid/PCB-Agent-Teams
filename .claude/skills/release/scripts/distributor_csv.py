@@ -10,8 +10,21 @@ Format spec: ../references/distributor_csv_formats.md
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
 from typing import Iterable
+
+_LCSC_URL_ID_RE = re.compile(r"/product-detail/(\d+)\.html")
+
+
+def _lcsc_part_number(vendor_url: str) -> str:
+    """Pull the LCSC numeric ID out of a product-detail URL and format it the
+    way LCSC's own BOM tool expects the column (e.g. "C492401"). The ID is
+    already sitting in Vendor_Url (populated from component-selecting/
+    component-preparing evidence's `vendor.url`) — there's no reason to leave
+    this column blank and make the user re-derive it by hand from the URL."""
+    m = _LCSC_URL_ID_RE.search(vendor_url or "")
+    return f"C{m.group(1)}" if m else ""
 
 
 def _read_bom(csv_path: Path) -> list[dict[str, str]]:
@@ -47,7 +60,7 @@ def transform_to_lcsc(rows: Iterable[dict[str, str]]) -> list[dict[str, str]]:
             "Comment": r["MPN"],
             "Designator": r["Refs"],
             "Footprint": r["Footprint"],
-            "LCSC Part #": "",
+            "LCSC Part #": _lcsc_part_number(r.get("Vendor_Url", "")),
             "Manufacture Part Number": r["MPN"],
             "Quantity": r["Qty"],
         }

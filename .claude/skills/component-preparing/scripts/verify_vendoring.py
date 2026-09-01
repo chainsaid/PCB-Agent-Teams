@@ -52,6 +52,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -154,6 +155,25 @@ def _parse_pitch_mm(text) -> float | None:
     return val
 
 
+# Tried newest-first — matches the vendored KiCadRoutingTools/install_plugin.py
+# precedent so a KiCad 9.x install isn't left unsupported by an assumed-10.0 path.
+_KICAD_WINDOWS_VERSIONS = ["10.0", "9.99", "9.0"]
+
+
+def _windows_kicad_paths(suffix: str) -> list[Path]:
+    """`suffix` e.g. `share\\kicad\\footprints`. Checks %ProgramFiles% /
+    %ProgramFiles(x86)% / %ProgramW6432% first (the common case — avoids a
+    26-drive-letter stat sweep, including any offline/disconnected mapped
+    drives, on every call) before falling back to a full C-Z scan for a
+    custom-drive install."""
+    roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    fast = [Path(f"{r}\\KiCad\\{ver}\\{suffix}") for r in roots if r for ver in _KICAD_WINDOWS_VERSIONS]
+    scan = [Path(f"{d}:\\Program Files{x86}\\KiCad\\{ver}\\{suffix}")
+            for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" for x86 in ("", " (x86)")
+            for ver in _KICAD_WINDOWS_VERSIONS]
+    return fast + scan
+
+
 def _resolve_footprint_file(workspace: Path, kicad_footprint: str) -> Path | None:
     """Find the .kicad_mod file for a 'Lib:Name' footprint reference.
 
@@ -171,7 +191,7 @@ def _resolve_footprint_file(workspace: Path, kicad_footprint: str) -> Path | Non
         Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints"),
         Path("/usr/share/kicad/footprints"),
         Path("/usr/local/share/kicad/footprints"),
-    ]
+    ] + _windows_kicad_paths(r"share\kicad\footprints")
     for root in kicad_fp_roots:
         candidates.append(root / f"{lib}.pretty" / f"{name}.kicad_mod")
     for c in candidates:

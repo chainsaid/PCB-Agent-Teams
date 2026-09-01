@@ -24,7 +24,9 @@
     1  有 fail → 修了再来
 """
 import argparse
+import functools
 import json
+import os
 import re
 import subprocess
 import sys
@@ -69,8 +71,20 @@ def _evidence_path_for(ds_dir: Path, mpn: str) -> Path:
     return ds_dir / "component_selecting" / f"{_safe_mpn_for_evidence(mpn)}.json"
 
 
+@functools.lru_cache(maxsize=None)
 def _read_component_selecting_evidence(ds_dir: Path, mpn: str) -> Optional[Dict]:
-    """Return the evidence dict if the JSON file exists and parses, else None."""
+    """Return the evidence dict if the JSON file exists and parses, else None.
+
+    Memoized: a single `check_one_component()` call can hit this up to 4x for
+    the same (ds_dir, mpn) — footprint-fallback, symbol-fallback, stock-check,
+    and datasheet-fallback branches are each conditional but a part failing
+    several checks hits several of them — and every BOM row sharing a
+    procurement_mpn (e.g. N identical 100nF caps) re-reads the same file
+    independently without this. The evidence file doesn't change mid-run
+    (component-preparing writes it before this script ever runs), so caching
+    across the whole process is safe. Callers only ever read fields off the
+    returned dict, never mutate it in place, so sharing the cached object is
+    fine too."""
     p = _evidence_path_for(ds_dir, mpn)
     if not p.exists():
         return None
@@ -201,9 +215,19 @@ def check_one_component(comp: Dict, tools: Dict, ds_dir: Path,
 
     category = _classify(py_symbol, mpn, ref)
 
+    # `mpn` above stays tied to `value` on purpose — classification and
+    # library/evidence lookups are keyed on it, and generic passives report a
+    # real MPN here would misclassify them as "connector" (see _classify).
+    # But `value` for a generic (82k/100nF/...) is not a distributor-searchable
+    # part number, so the procurement BOM needs the *actual* MPN when one has
+    # been injected — inject_mpn_props.py writes it as a `MPN=` Component()
+    # kwarg, surfaced here as `mpn_prop` by extract_components_from_py.
+    procurement_mpn = comp.get("mpn_prop") or mpn
+
     result = {
         "ref": ref,
         "mpn": mpn,
+        "procurement_mpn": procurement_mpn,
         "py_symbol": py_symbol,
         "footprint": fp,
         "category": category,
@@ -313,7 +337,23 @@ def check_one_component(comp: Dict, tools: Dict, ds_dir: Path,
 
     # ============ 可买性检查（component-selecting evidence）============
     if skip_stock or category in ("generic", "connector"):
-        result["stock_ok"] = None  # 跳过
+        result["stock_ok"] = None  # 跳过 —— generic 不需要重新核 buyability gate
+        # But if evidence exists for this part's real MPN, coverage_scan.py
+        # (release's vendor-decision step) already reads its vendor price /
+        # stock / URL — check_readiness's own BOM CSV should show the same
+        # data instead of leaving Vendor_Status/Stock/Url blank. Covers both
+        # generics with an injected MPN (procurement_mpn != value) and
+        # connectors, whose `value` already *is* the real MPN so this simply
+        # looks it up directly.
+        if procurement_mpn:
+            ev = _read_component_selecting_evidence(ds_dir, procurement_mpn)
+            if ev:
+                vendor = ev.get("vendor") or {}
+                result["vendor_status"] = vendor.get("status")
+                result["vendor_stock"] = vendor.get("stock")
+                result["vendor_price"] = vendor.get("price")
+                result["vendor_currency"] = vendor.get("currency")
+                result["vendor_url"] = vendor.get("url")
     elif not mpn or len(mpn) < 4:
         result["stock_ok"] = None
     else:
@@ -441,10 +481,13 @@ def generate_bom_csv(components: List[Dict], py_file: Path,
     格式（采购导入 + 给人看）：
         Qty,Refs,MPN,Category,Footprint,Vendor_Status,Vendor_Stock,Vendor_Url,Datasheet
     """
-    # 按 MPN 聚合数量
+    # 按 MPN 聚合数量。procurement_mpn falls back to mpn (=value) when no real
+    # MPN was injected — but prefer it so generics (82k/100nF/...) show the
+    # actual purchasable part number here instead of the electrical quantity,
+    # which no distributor can look up.
     by_mpn: Dict[str, Dict] = {}
     for c in components:
-        mpn = c.get("mpn") or "<placeholder>"
+        mpn = c.get("procurement_mpn") or c.get("mpn") or "<placeholder>"
         if mpn not in by_mpn:
             by_mpn[mpn] = {
                 "refs": [], "py_symbol": c.get("py_symbol"),
@@ -550,11 +593,30 @@ def _is_real_datasheet_pdf(pdf_path: Path) -> bool:
 # Symbol library 索引 — verify_footprints 只扫 footprint，这里补 symbol
 # ===================================================================
 
+# Tried newest-first — matches the vendored KiCadRoutingTools/install_plugin.py
+# precedent so a KiCad 9.x install isn't left unsupported by an assumed-10.0 path.
+_KICAD_WINDOWS_VERSIONS = ["10.0", "9.99", "9.0"]
+
+
+def _windows_kicad_paths(suffix: str) -> list:
+    """`suffix` e.g. `share\\kicad\\symbols`. Checks %ProgramFiles% /
+    %ProgramFiles(x86)% / %ProgramW6432% first (the common case — avoids a
+    26-drive-letter stat sweep, including any offline/disconnected mapped
+    drives, on every call) before falling back to a full C-Z scan for a
+    custom-drive install."""
+    roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    fast = [Path(f"{r}\\KiCad\\{ver}\\{suffix}") for r in roots if r for ver in _KICAD_WINDOWS_VERSIONS]
+    scan = [Path(f"{d}:\\Program Files{x86}\\KiCad\\{ver}\\{suffix}")
+            for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" for x86 in ("", " (x86)")
+            for ver in _KICAD_WINDOWS_VERSIONS]
+    return fast + scan
+
+
 _KICAD_SYM_DIRS = [
     Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols"),
     Path("/usr/share/kicad/symbols"),
     Path("/usr/local/share/kicad/symbols"),
-]
+] + _windows_kicad_paths(r"share\kicad\symbols")
 _LIB_EXTERNAL_DIR = Path(__file__).resolve().parents[4] / "lib_external"
 
 # 顶层 symbol 声明：行首任意空白（tab 或空格），然后 (symbol "Name"

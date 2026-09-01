@@ -24,12 +24,47 @@ from urllib.request import Request, urlopen
 # Override with KICAD_ROOT env var if the layout ever moves.
 KICAD_ROOT = Path(os.environ.get("KICAD_ROOT") or Path(__file__).resolve().parents[4])
 LIB_EXTERNAL = KICAD_ROOT / "lib_external"
-EASYEDA2KICAD = KICAD_ROOT / ".venv/bin/easyeda2kicad"
+_VENV_SCRIPTS_DIR = "Scripts" if sys.platform == "win32" else "bin"
+_EASYEDA2KICAD_NAME = "easyeda2kicad.exe" if sys.platform == "win32" else "easyeda2kicad"
+EASYEDA2KICAD = KICAD_ROOT / ".venv" / _VENV_SCRIPTS_DIR / _EASYEDA2KICAD_NAME
 WRITE_GUARD_ENV = "COMPONENT_SELECTING_LCSC_WRITE"
 
 
+def _query_lcsc_id_via_jlcsearch(mpn: str) -> str | None:
+    """Fallback ID lookup via jlcsearch.tscircuit.com's free-text search API.
+
+    The primary Jina-Reader-proxy scrape below is flaky for MPNs containing
+    dots (e.g. pitch codes like "5.08") — the search page it fetches sometimes
+    returns no results for those, even though the part exists on LCSC. This
+    endpoint (already used elsewhere in this workspace for CN-locale discovery)
+    hits LCSC's own indexed part data directly and matches reliably on exact MPN.
+    """
+    import json as _json
+    import urllib.parse as _urlparse
+
+    url = "https://jlcsearch.tscircuit.com/api/search?q=" + _urlparse.quote(mpn) + "&limit=5&full=true"
+    try:
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(req, timeout=25) as r:
+            data = _json.loads(r.read())
+    except Exception:
+        return None
+    rows = data if isinstance(data, list) else data.get("results") or data.get("components") or []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_mpn = str(row.get("mfr") or row.get("mpn") or "").strip()
+        lcsc = row.get("lcsc")
+        if lcsc and row_mpn.lower() == mpn.lower():
+            return f"C{lcsc}"
+    # No exact match — fall back to the first result if there's exactly one.
+    if len(rows) == 1 and isinstance(rows[0], dict) and rows[0].get("lcsc"):
+        return f"C{rows[0]['lcsc']}"
+    return None
+
+
 def query_lcsc_id(mpn: str) -> str | None:
-    """用 Jina Reader 代理读 LCSC 搜索页，提取真实 LCSC C 编号。"""
+    """用 Jina Reader 代理读 LCSC 搜索页，提取真实 LCSC C 编号；失败时退到 jlcsearch API。"""
     url = f"https://r.jina.ai/https://www.lcsc.com/search?q={mpn}"
     try:
         req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -37,11 +72,13 @@ def query_lcsc_id(mpn: str) -> str | None:
             text = r.read().decode("utf-8", errors="ignore")
     except Exception as e:
         print(f"  ⚠ 查 {mpn} 失败: {e}")
-        return None
+        text = ""
 
     # 真实 LCSC ID 在 product-detail URL 里
-    m = re.search(r"/product-detail/(C\d+)\.html", text)
-    return m.group(1) if m else None
+    m = re.search(r"/product-detail/(C\d+)\.html", text) if text else None
+    if m:
+        return m.group(1)
+    return _query_lcsc_id_via_jlcsearch(mpn)
 
 
 def download_one(lcsc_id: str, lib_name: str) -> bool:

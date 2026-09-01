@@ -3164,14 +3164,32 @@ def extract_silkscreen(root: list, footprints: list[dict]) -> dict:
             if len(prop) >= 3 and prop[1] == "Reference":
                 layer = get_value(prop, "layer")
                 if layer and ("SilkS" in layer or "Silkscreen" in layer):
-                    # Check if hidden via (effects (font ...) hide)
-                    effects = find_first(prop, "effects")
+                    # `(hide yes)` is a direct child of the `property` node
+                    # itself — a SIBLING of `(effects ...)`, e.g.:
+                    #   (property "Reference" "R2" (at ...) (layer "F.SilkS")
+                    #             (hide yes) (effects (font ...)))
+                    # Looking for it *inside* `effects` (as the code used to)
+                    # never matches this KiCad 7+ format, so every hidden ref
+                    # silently read back as visible — exactly the false
+                    # positive that let a blank-silkscreen board pass this
+                    # analyzer. Still also check inside effects for the older
+                    # bare-atom-in-effects form some KiCad 5/6 files used.
                     is_hidden = False
-                    if effects:
-                        for child in effects:
-                            if child == "hide" or (isinstance(child, list) and child[0] == "hide"):
+                    hide_node = find_first(prop, "hide")
+                    if hide_node is not None:
+                        is_hidden = True
+                    else:
+                        for child in prop:
+                            if child == "hide":
                                 is_hidden = True
                                 break
+                    if not is_hidden:
+                        effects = find_first(prop, "effects")
+                        if effects:
+                            for child in effects:
+                                if child == "hide" or (isinstance(child, list) and child[0] == "hide"):
+                                    is_hidden = True
+                                    break
                     if not is_hidden:
                         ref_visible = True
                 break

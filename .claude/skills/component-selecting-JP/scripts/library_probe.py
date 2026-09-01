@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -55,8 +56,41 @@ from typing import Iterable, Optional
 WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
 LIB_EXTERNAL = WORKSPACE_ROOT / "lib_external"
 LIB_CACHE = WORKSPACE_ROOT / "lib_cache" / "sources"
-KICAD_STD_SYMBOLS = Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols")
-KICAD_STD_FOOTPRINTS = Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints")
+# Tried newest-first — matches the vendored KiCadRoutingTools/install_plugin.py
+# precedent so a KiCad 9.x install isn't left unsupported by an assumed-10.0 path.
+_KICAD_WINDOWS_VERSIONS = ["10.0", "9.99", "9.0"]
+
+
+def _windows_kicad_paths(suffix: str) -> list:
+    """Checks %ProgramFiles% / %ProgramFiles(x86)% / %ProgramW6432% first
+    (the common case — avoids a 26-drive-letter stat sweep, including any
+    offline/disconnected mapped drives, on every call) before falling back
+    to a full C-Z scan for a custom-drive install."""
+    roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    fast = [Path(f"{r}\\KiCad\\{ver}\\{suffix}") for r in roots if r for ver in _KICAD_WINDOWS_VERSIONS]
+    scan = [Path(f"{d}:\\Program Files{x86}\\KiCad\\{ver}\\{suffix}")
+            for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" for x86 in ("", " (x86)")
+            for ver in _KICAD_WINDOWS_VERSIONS]
+    return fast + scan
+
+
+def _find_kicad_std_dir(macos_leaf: str, win_leaf: str) -> Path:
+    """First existing candidate across macOS/Linux/Windows (any drive letter —
+    KiCad's Windows installer lets the user pick one, not just C:), else the
+    macOS path as a harmless default (downstream code only calls .exists())."""
+    candidates = [
+        Path(f"/Applications/KiCad/KiCad.app/Contents/SharedSupport/{macos_leaf}"),
+        Path(f"/usr/share/kicad/{macos_leaf}"),
+        Path(f"/usr/local/share/kicad/{macos_leaf}"),
+    ] + _windows_kicad_paths(f"share\\kicad\\{win_leaf}")
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]
+
+
+KICAD_STD_SYMBOLS = _find_kicad_std_dir("symbols", "symbols")
+KICAD_STD_FOOTPRINTS = _find_kicad_std_dir("footprints", "footprints")
 
 
 # ---------- Package consistency token sets ----------------------------------

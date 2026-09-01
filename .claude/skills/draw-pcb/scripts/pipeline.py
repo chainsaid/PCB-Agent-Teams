@@ -23,6 +23,7 @@ routing and go straight to review.
 """
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -39,13 +40,32 @@ while KICAD_ROOT.parent != KICAD_ROOT:
         break
     KICAD_ROOT = KICAD_ROOT.parent
 
+# Tried newest-first — matches the vendored KiCadRoutingTools/install_plugin.py
+# precedent so a KiCad 9.x install isn't left unsupported by an assumed-10.0 path.
+_KICAD_WINDOWS_VERSIONS = ["10.0", "9.99", "9.0"]
+
+
+def _windows_kicad_candidates(exe_name: str) -> list:
+    """KiCad's Windows installer lets the user pick any drive, so scan them
+    all rather than assuming C: (e.g. `D:\\Program Files\\KiCad\\10.0\\...`).
+    Checks %ProgramFiles%/%ProgramFiles(x86)%/%ProgramW6432% first (the
+    common case — avoids a 26-drive stat sweep, including any
+    offline/disconnected mapped drives, on every call)."""
+    roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    fast = [f"{r}\\KiCad\\{ver}\\bin\\{exe_name}" for r in roots if r for ver in _KICAD_WINDOWS_VERSIONS]
+    subpaths = [rf"Program Files\KiCad\{ver}\bin\{exe_name}" for ver in _KICAD_WINDOWS_VERSIONS] + \
+               [rf"Program Files (x86)\KiCad\{ver}\bin\{exe_name}" for ver in _KICAD_WINDOWS_VERSIONS]
+    scan = [f"{d}:\\{sub}" for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" for sub in subpaths]
+    return fast + scan
+
+
 KICAD_CLI = ""
 for p in [
     "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
     "/usr/bin/kicad-cli",
     "/usr/local/bin/kicad-cli",
     "/snap/kicad/current/bin/kicad-cli",
-]:
+] + _windows_kicad_candidates("kicad-cli.exe"):
     if Path(p).exists():
         KICAD_CLI = p
         break
@@ -57,12 +77,13 @@ for p in [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3",
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3.9",
     "/usr/lib/kicad/python3",
-]:
+] + _windows_kicad_candidates("python.exe"):
     if Path(p).exists():
         KICAD_PYTHON = p
         break
 
-VENV_PYTHON = str(KICAD_ROOT / ".venv" / "bin" / "python") if KICAD_ROOT else ""
+_VENV_PY_REL = "Scripts/python.exe" if sys.platform == "win32" else "bin/python"
+VENV_PYTHON = str(KICAD_ROOT / ".venv" / _VENV_PY_REL) if KICAD_ROOT else ""
 
 # Paths updated 2026-05 after skill consolidation:
 #   emc/kicad analyzers → check-schematic / check-pcb

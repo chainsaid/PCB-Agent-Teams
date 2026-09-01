@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -27,7 +28,7 @@ else:
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
 KICAD_EXPORT_GERBERS = WORKSPACE_ROOT / ".claude/skills/release/scripts/export_gerbers.py"
-VENV_PYTHON = WORKSPACE_ROOT / ".venv/bin/python"
+VENV_PYTHON = WORKSPACE_ROOT / (".venv/Scripts/python.exe" if sys.platform == "win32" else ".venv/bin/python")
 
 # JST = UTC+9. Use a fixed offset rather than zoneinfo to avoid platform tz-data issues.
 from datetime import timedelta
@@ -45,15 +46,33 @@ def _find_pcb(project_dir: Path) -> Path | None:
 
     Picks the file whose stem matches the project name to avoid backup variants
     like `<name>_ZZ.kicad_pcb` or `<name>.kicad_pcb.pre_fix`.
+
+    draw-pcb's Phase E router deliberately writes routed output to a sibling
+    `<name>_routed.kicad_pcb` rather than overwriting the placement-only board
+    (so a user can re-place without the routed copper in the way). When that
+    routed copy exists it's usually the actual board to fab — *unless* the
+    user went back into KiCad GUI and hand-edited the unrouted placement-only
+    board afterward (an explicitly supported workflow per draw-pcb's own
+    docs), which makes the routed copy stale. Compare mtimes rather than
+    always preferring `_routed`, so an edit made after routing doesn't get
+    silently ignored in favor of copper that no longer matches the current
+    placement.
     """
     name = project_dir.name
-    candidates = [
+    routed_candidates = [
+        project_dir / "kicad" / f"{name}_routed.kicad_pcb",
+        project_dir / "kicad" / name / f"{name}_routed.kicad_pcb",
+    ]
+    plain_candidates = [
         project_dir / "kicad" / f"{name}.kicad_pcb",
         project_dir / "kicad" / name / f"{name}.kicad_pcb",
     ]
-    for c in candidates:
-        if c.is_file():
-            return c
+    routed = next((c for c in routed_candidates if c.is_file()), None)
+    plain = next((c for c in plain_candidates if c.is_file()), None)
+    if routed and plain:
+        return routed if routed.stat().st_mtime >= plain.stat().st_mtime else plain
+    if routed or plain:
+        return routed or plain
     # Fallback: any .kicad_pcb under kicad/, prefer ones whose stem matches project name.
     matches = [p for p in (project_dir / "kicad").rglob("*.kicad_pcb") if p.is_file()]
     name_match = [p for p in matches if p.stem == name]
@@ -115,21 +134,55 @@ def _check_gate(project_dir: Path) -> tuple[bool, str, dict]:
 
 # ---------- board summary (best-effort) ----------
 
+GET_GEOMETRY = WORKSPACE_ROOT / ".claude/skills/draw-pcb/scripts/tools/get_geometry.py"
+
+
 def _board_summary(pcb_path: Path) -> dict:
+    """Best-effort board stats for ORDER_GUIDE.
+
+    SMD/THT counts and board size come from get_geometry.py (reads the real
+    per-footprint `type` and Edge.Cuts bbox via the pcbnew API) rather than
+    substring-counting `"(footprint "` in the raw text, which can only ever
+    produce a total count — it has no way to tell SMD from THT, so a prior
+    version of this function hardcoded n_tht to "0" unconditionally, silently
+    misreporting every board that has any through-hole part (connectors,
+    electrolytic caps, THT headers) as 100% SMD.
+    """
     fallback = {
         "thickness_mm": "?", "layers": "?", "size_mm": "?",
         "n_components": "?", "n_smt": "?", "n_tht": "?",
     }
+    summary = dict(fallback)
+
     try:
         text = pcb_path.read_text(errors="replace")
     except OSError:
-        return fallback
-    n_footprints = text.count("(footprint ")
-    summary = dict(fallback)
-    if n_footprints:
-        summary["n_components"] = str(n_footprints)
-        summary["n_smt"] = str(n_footprints)
-        summary["n_tht"] = "0"
+        text = ""
+    if text:
+        m = re.search(r"\(general\b.*?\(thickness\s+([\d.]+)\)", text, re.DOTALL)
+        if m:
+            summary["thickness_mm"] = m.group(1)
+        layers_block = re.search(r"\(layers\b(.*?)\n\t\)", text, re.DOTALL)
+        if layers_block:
+            summary["layers"] = str(len(re.findall(r'"\s*signal\)', layers_block.group(1))))
+
+    try:
+        proc = subprocess.run(
+            [str(VENV_PYTHON), str(GET_GEOMETRY), str(pcb_path), "--no-pads"],
+            capture_output=True, text=True, timeout=60,
+        )
+        geom = json.loads(proc.stdout)
+        if geom.get("ok"):
+            footprints = geom.get("footprints", [])
+            summary["n_components"] = str(len(footprints))
+            summary["n_smt"] = str(sum(1 for f in footprints if f.get("type") == "smd"))
+            summary["n_tht"] = str(sum(1 for f in footprints if f.get("type") == "through_hole"))
+            board = geom.get("board") or {}
+            if "w" in board and "h" in board:
+                summary["size_mm"] = f"{board['w']:.2f} x {board['h']:.2f}"
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError, ValueError):
+        pass  # keep whatever the regex pass above already filled in, rest stays "?"
+
     return summary
 
 
@@ -238,9 +291,20 @@ def _run_reuse(project_dir: Path, release_id: str) -> int:
             print(f"     stderr: {r['stderr_tail']}")
 
     # Re-pack the fab zip so distributors get the refreshed Gerber set.
+    #
+    # Name it from the manifest's own recorded zip path, not from bare
+    # project_name: export_gerbers.py names every artifact (including the
+    # zip) after the *pcb file's* stem, and since _find_pcb can resolve to a
+    # sibling like "<name>_routed.kicad_pcb" (draw-pcb Phase E), the original
+    # full build's zip was "<name>_routed_fab.zip" — reconstructing from
+    # project_name here would silently produce and leave stale a
+    # differently-named zip while ORDER_GUIDE.md still points at the
+    # original.
     pcb_fab_dir = rel_dir / "pcb_fab"
-    project_name = project_dir.name
-    zip_path = pcb_fab_dir / f"{project_name}_fab.zip"
+    manifest = json.loads(manifest_path.read_text())
+    recorded_zip = manifest.get("zip")
+    zip_path = pcb_fab_dir / Path(recorded_zip).name if recorded_zip else \
+        pcb_fab_dir / f"{Path(manifest.get('pcb', project_dir.name)).stem}_fab.zip"
     if pcb_fab_dir.is_dir():
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for f in pcb_fab_dir.rglob("*"):
@@ -399,6 +463,11 @@ def main(argv: list[str] | None = None) -> int:
 
     context = {
         "project": project_name,
+        # export_gerbers.py names every fab artifact after the *pcb file's*
+        # stem, not the bare project name — the two only coincide when there's
+        # no sibling variant (e.g. draw-pcb's Phase E "<name>_routed.kicad_pcb").
+        # The template must reference filenames via this, not `project`.
+        "pcb_stem": pcb.stem,
         "generated_at": now_jst.strftime("%Y-%m-%d %H:%M JST"),
         "release_id": release_id,
         "board": board,
@@ -415,6 +484,12 @@ def main(argv: list[str] | None = None) -> int:
         },
         "gate": {
             "status": "PASS",
+            # This is bom-readiness's sentinel timestamp, not check-pcb's —
+            # check-pcb has no machine-readable verdict file of its own yet
+            # (see release_internals.md: "读 check-pcb verdict.json（gate 协议，
+            # 待落地）"), so there is nothing else to report here. Label it for
+            # what it actually is rather than let the template call it a
+            # "check-pcb gate" timestamp it never was.
             "timestamp": sentinel.get("verified_at", "unknown"),
         },
     }

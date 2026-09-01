@@ -52,8 +52,7 @@ from typing import Dict, Optional
 # Workspace root = .../PCB-Agent-Teams/.claude/skills/draw-schematic/scripts/pipeline.py → parents[4].
 # Override with KICAD_ROOT env var if the layout ever moves.
 KICAD_ROOT = Path(os.environ.get("KICAD_ROOT") or Path(__file__).resolve().parents[4])
-VENV_PYTHON = KICAD_ROOT / ".venv/bin/python"
-KICAD_CLI = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
+VENV_PYTHON = KICAD_ROOT / (".venv/Scripts/python.exe" if sys.platform == "win32" else ".venv/bin/python")
 KICAD_SKILLS_ROOT = KICAD_ROOT / ".claude" / "skills"
 # Paths updated 2026-05 after skill consolidation:
 #   kicad/scripts/analyze_schematic.py → check-schematic/scripts/
@@ -62,10 +61,39 @@ KICAD_ANALYZE_SCH = KICAD_SKILLS_ROOT / "check-schematic" / "scripts" / "analyze
 SPICE_SIMULATE = KICAD_SKILLS_ROOT / "check-schematic" / "scripts" / "simulate_subcircuits.py"
 
 
+# Tried in order — matches the precedent already set by the vendored
+# KiCadRoutingTools/install_plugin.py's own KICAD_VERSIONS list. A prior
+# version of this file's Windows path list hardcoded both 10.0 and 9.0; the
+# drive-scan rewrite dropped 9.0, silently regressing anyone still on it.
+_KICAD_WINDOWS_VERSIONS = ["10.0", "9.99", "9.0"]
+
+
+def _windows_kicad_candidates(exe_name: str) -> list:
+    """KiCad's Windows installer lets the user pick any drive, so scan them
+    all rather than assuming C: (e.g. `D:\\Program Files\\KiCad\\10.0\\...`).
+    Also tries each version in _KICAD_WINDOWS_VERSIONS, newest first."""
+    subpaths = [
+        rf"Program Files\KiCad\{v}\bin\{exe_name}"
+        for v in _KICAD_WINDOWS_VERSIONS
+    ] + [
+        rf"Program Files (x86)\KiCad\{v}\bin\{exe_name}"
+        for v in _KICAD_WINDOWS_VERSIONS
+    ]
+    return [f"{d}:\\{sub}" for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" for sub in subpaths]
+
+
 def _build_symbol_env() -> dict:
     """Build env dict with KICAD_SYMBOL_DIR including lib_external/."""
     env = os.environ.copy()
-    kicad_sym_dir = "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols"
+    cli_path = Path(find_kicad_cli())
+    if sys.platform == "darwin":
+        # .../KiCad.app/Contents/MacOS/kicad-cli -> .../Contents/SharedSupport/symbols
+        kicad_sym_dir = str(cli_path.parent.parent / "SharedSupport" / "symbols")
+    elif sys.platform == "win32":
+        # .../KiCad/10.0/bin/kicad-cli.exe -> .../KiCad/10.0/share/kicad/symbols
+        kicad_sym_dir = str(cli_path.parent.parent / "share" / "kicad" / "symbols")
+    else:
+        kicad_sym_dir = "/usr/share/kicad/symbols"
     lib_external = str(KICAD_ROOT / "lib_external")
     existing = env.get("KICAD_SYMBOL_DIR", "")
     paths = [p for p in existing.split(os.pathsep) if p] + [kicad_sym_dir, lib_external]
@@ -84,9 +112,7 @@ def find_kicad_cli() -> str:
         "/usr/bin/kicad-cli",                                       # Linux apt
         "/usr/local/bin/kicad-cli",                                 # Linux symlink
         "/snap/kicad/current/bin/kicad-cli",                        # Linux snap
-        r"C:\Program Files\KiCad\10.0\bin\kicad-cli.exe",           # Windows
-        r"C:\Program Files\KiCad\9.0\bin\kicad-cli.exe",            # Windows 9
-    ]
+    ] + _windows_kicad_candidates("kicad-cli.exe")
     for c in candidates:
         if Path(c).exists():
             return c
@@ -492,6 +518,15 @@ def main():
     py_file = Path(args.py_file).resolve()
     if not py_file.exists():
         sys.exit(f"❌ 文件不存在: {py_file}")
+
+    # _build_symbol_env() previously only reached the run_circuit_synth
+    # subprocess. fix_labels_for_sch runs in THIS process and calls
+    # kicad_sch_api.get_symbol_info(), which reads KICAD_SYMBOL_DIR from
+    # os.environ directly — without this, generic-passive lookups (Device:R
+    # etc, not vendored into lib_external/) silently fail, fix_labels finds
+    # 0 pins to label, and ERC comes back all-pins-unconnected with no error
+    # raised anywhere in between. Applying it process-wide fixes both call sites.
+    os.environ.update(_build_symbol_env())
 
     print(f"=== Pipeline: {py_file.name} ===")
     kicad_cli = find_kicad_cli()

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -21,14 +22,32 @@ import sys
 import zipfile
 from pathlib import Path
 
+# Tried newest-first — matches the vendored KiCadRoutingTools/install_plugin.py
+# precedent so a KiCad 9.x install isn't left unsupported by an assumed-10.0 path.
+_KICAD_WINDOWS_VERSIONS = ["10.0", "9.99", "9.0"]
+
+
+def _windows_kicad_cli_candidates() -> list[str]:
+    """KiCad's Windows installer lets the user pick any drive, so scan them
+    all rather than assuming C: (e.g. `D:\\Program Files\\KiCad\\10.0\\...`).
+    Checks %ProgramFiles%/%ProgramFiles(x86)%/%ProgramW6432% first (the
+    common case — avoids a 26-drive stat sweep, including any
+    offline/disconnected mapped drives, on every call)."""
+    exe_name = "kicad-cli.exe"
+    roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    fast = [f"{r}\\KiCad\\{ver}\\bin\\{exe_name}" for r in roots if r for ver in _KICAD_WINDOWS_VERSIONS]
+    subpaths = [rf"Program Files\KiCad\{ver}\bin\{exe_name}" for ver in _KICAD_WINDOWS_VERSIONS] + \
+               [rf"Program Files (x86)\KiCad\{ver}\bin\{exe_name}" for ver in _KICAD_WINDOWS_VERSIONS]
+    scan = [f"{d}:\\{sub}" for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" for sub in subpaths]
+    return fast + scan
+
 
 KICAD_CLI_CANDIDATES = [
     "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
     "/usr/bin/kicad-cli",
     "/usr/local/bin/kicad-cli",
     "/snap/kicad/current/bin/kicad-cli",
-    "C:/Program Files/KiCad/10.0/bin/kicad-cli.exe",
-]
+] + _windows_kicad_cli_candidates()
 
 DEFAULT_NON_COPPER_LAYERS = [
     "F.Paste",

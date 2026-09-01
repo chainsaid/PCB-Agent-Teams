@@ -26,13 +26,31 @@ from typing import Dict, List, Optional, Tuple
 
 # ── KiCad CLI + bundled Python detection ─────────────────────
 
+# Tried newest-first; matches the vendored KiCadRoutingTools/install_plugin.py
+# precedent so a KiCad 9.x install isn't left unsupported.
+_KICAD_WINDOWS_VERSIONS = ["10.0", "9.99", "9.0"]
+
+
+def _windows_kicad_candidates(exe_name: str) -> list:
+    """KiCad's Windows installer lets the user pick any drive, so scan them
+    all rather than assuming C: (e.g. `D:\\Program Files\\KiCad\\10.0\\...`)."""
+    subpaths = [
+        rf"Program Files\KiCad\{v}\bin\{exe_name}"
+        for v in _KICAD_WINDOWS_VERSIONS
+    ] + [
+        rf"Program Files (x86)\KiCad\{v}\bin\{exe_name}"
+        for v in _KICAD_WINDOWS_VERSIONS
+    ]
+    return [f"{d}:\\{sub}" for d in "CDEFGHIJKLMNOPQRSTUVWXYZ" for sub in subpaths]
+
+
 KICAD_CLI = ""
 for p in [
     "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli",
     "/usr/bin/kicad-cli",
     "/usr/local/bin/kicad-cli",
     "/snap/kicad/current/bin/kicad-cli",
-]:
+] + _windows_kicad_candidates("kicad-cli.exe"):
     if Path(p).exists():
         KICAD_CLI = p
         break
@@ -45,12 +63,51 @@ for p in [
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.9/bin/python3.9",
     "/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/3.10/bin/python3.10",
     "/usr/lib/kicad/python3",  # Linux
-]:
+] + _windows_kicad_candidates("python.exe"):
     if Path(p).exists():
         KICAD_PYTHON = p
         break
 
-KICAD_FP_DIR = Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints")
+def _find_kicad_fp_dir() -> Path:
+    """Standard KiCad footprint dir, derived from wherever kicad-cli was
+    actually found rather than hardcoded per-OS (avoids drifting out of sync
+    with KICAD_CLI's own drive-scan / version resolution)."""
+    if KICAD_CLI:
+        cli_path = Path(KICAD_CLI)
+        if sys.platform == "darwin":
+            # .../KiCad.app/Contents/MacOS/kicad-cli -> .../Contents/SharedSupport/footprints
+            cand = cli_path.parent.parent / "SharedSupport" / "footprints"
+        elif sys.platform == "win32":
+            # .../KiCad/10.0/bin/kicad-cli.exe -> .../KiCad/10.0/share/kicad/footprints
+            cand = cli_path.parent.parent / "share" / "kicad" / "footprints"
+        else:
+            cand = Path("/usr/share/kicad/footprints")
+        if cand.is_dir():
+            return cand
+    # KICAD_CLI empty, or the derived `cand` above didn't pan out (e.g.
+    # kicad-cli resolved via shutil.which from a PATH entry whose layout
+    # doesn't match the assumed bin/../share/kicad structure — a portable
+    # or non-standard install). The old fallback here was an unconditional
+    # macOS path, which can never exist on Windows/Linux — dead code on
+    # every non-macOS platform rather than an actual last resort. Try each
+    # platform's own env-var-anchored guess instead before giving up.
+    if sys.platform == "win32":
+        for root_var in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"):
+            root = os.environ.get(root_var)
+            if not root:
+                continue
+            for v in _KICAD_WINDOWS_VERSIONS:
+                cand = Path(root) / "KiCad" / v / "share" / "kicad" / "footprints"
+                if cand.is_dir():
+                    return cand
+        return Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / \
+            "KiCad" / _KICAD_WINDOWS_VERSIONS[0] / "share" / "kicad" / "footprints"
+    if sys.platform == "darwin":
+        return Path("/Applications/KiCad/KiCad.app/Contents/SharedSupport/footprints")
+    return Path("/usr/share/kicad/footprints")
+
+
+KICAD_FP_DIR = _find_kicad_fp_dir()
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 HELPER_SCRIPT = SCRIPT_DIR / "_kicad_python_helper.py"

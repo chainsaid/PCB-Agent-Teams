@@ -113,6 +113,33 @@ def test_build_release_e2e_writes_full_tree(tmp_path):
         assert any(n.endswith("procurement/digikey_bulk.csv") for n in names)
 
 
+def test_find_pcb_prefers_newer_of_routed_and_plain(tmp_path):
+    """draw-pcb's Phase E router writes a sibling `<name>_routed.kicad_pcb`
+    rather than overwriting the placement-only board. If the user later goes
+    back into KiCad GUI and hand-edits the *unrouted* board (an explicitly
+    supported workflow), that edit must win — release should not silently
+    fab stale copper just because a `_routed` file happens to exist.
+    """
+    proj = tmp_path / "proj"
+    kicad_dir = proj / "kicad"
+    kicad_dir.mkdir(parents=True)
+    plain = kicad_dir / "proj.kicad_pcb"
+    routed = kicad_dir / "proj_routed.kicad_pcb"
+
+    # Case 1: only routed exists -> routed wins.
+    routed.write_text("(kicad_pcb (routed))")
+    assert build_release._find_pcb(proj) == routed
+
+    # Case 2: plain edited after routing (hand-edit in GUI) -> plain wins.
+    plain.write_text("(kicad_pcb (hand-edited))")
+    os.utime(plain, (time.time() + 10, time.time() + 10))
+    assert build_release._find_pcb(proj) == plain
+
+    # Case 3: routed re-generated after that edit -> routed wins again.
+    os.utime(routed, (time.time() + 20, time.time() + 20))
+    assert build_release._find_pcb(proj) == routed
+
+
 def test_build_release_fails_gate_when_sentinel_missing(tmp_path):
     proj = _make_fixture_project(tmp_path)
     (proj / "datasheets" / ".bom_readiness.json").unlink()

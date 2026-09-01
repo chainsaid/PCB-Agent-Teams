@@ -30,6 +30,11 @@ def render_all(context: dict, out_dir: Path) -> dict[str, Path]:
         template = env.get_template(f"{name}.tmpl")
         rendered = template.render(**context)
         path = out_dir / name
-        path.write_text(rendered)
+        # Explicit encoding, not the platform default: these templates contain
+        # CJK text and ✓/❌ marks, and Windows' default text-mode encoding is
+        # the ANSI codepage (e.g. GBK), not UTF-8 — writing without this raises
+        # UnicodeEncodeError on any Windows box where the caller didn't happen
+        # to set PYTHONUTF8/PYTHONIOENCODING first.
+        path.write_text(rendered, encoding="utf-8")
         written[name] = path
     return written
