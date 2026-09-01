@@ -76,3 +76,6 @@ lib_cache/sources/
 # LCSC dry-run caches — machine-local, regenerated on demand
 lib_cache/lcsc_dryrun_cache/
 lib_cache/lcsc_dryrun_cache_v2/
+
+# EasyEDA bridge skill — npm deps are machine-local, regenerate with `npm install`
+.claude/skills/easyeda-api-skill/node_modules/
