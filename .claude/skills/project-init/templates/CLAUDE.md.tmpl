@@ -63,10 +63,11 @@
 
 | role | 元件角色 | 目标 spec（硬值 / 范围 / TBD:原因） | 已有件 MPN | 状态 |
 |------|---------|-----------------------------------|-----------|------|
-| iso_amp | 隔离放大器 | — | — | spec_frozen |
-| hv_div_top | HV 分压上臂 | — | — | spec_frozen |
-| c_in_np0 | 输入 NP0 电容 | — | — | spec_frozen |
-| hv_terminal | HV 螺丝端子 | — | — | spec_frozen |
+| `<role_snake_case>` | `<角色名>` | — | — | spec_frozen |
+| `<role_snake_case>` | `<角色名>` | — | — | spec_frozen |
+
+> role ID 用 snake_case **功能名**（`vin_bulk_cap` / `sw_fet_hs` / `fb_div_top`），**禁** `R1` / `U2` / `C1`。
+> 行数按实际 role 增删 —— 上面两行只是占位。
 
 > 状态三态：`locked`（已有件 MPN 钉死）/ `spec_frozen`（spec 冻好待选）/ `TBD`（spec 缺，**带原因+归属**）。spec cell 不留裸空格。
 > 冻结后由 `component-preparing` 抓资产 + 出 BOM 验收 sentinel → 通过后才能 draw-schematic。
@@ -81,14 +82,26 @@
 
 ---
 
-## 7. 安规布局 checklist（PCB 阶段对照）
+## 7. 安规 / 布局 checklist（PCB 阶段对照）
 
-- [ ] HV/LV 隔离槽 ≥1.5mm 宽（有高压时）
-- [ ] 爬电距离 ≥8mm
-- [ ] 电气间隙 ≥2mm
-- [ ] 走线宽度 ≥0.5mm（高压）
-- [ ] 差分对长度匹配 ≤5mm
-- [ ] 去耦电容紧贴 IC 引脚 ≤2mm
+**通用（每块板都查）**
+
+- [ ] 去耦电容紧贴 IC 电源引脚 ≤2mm
+- [ ] 功率路径走线宽度按实际电流定（查 IPC-2221 或铜厚温升表，别沿用别的板）
+- [ ] 大电流回流路径短、不跨分割地
+- [ ] 差分对长度匹配（阈值按信号速率定）
+- [ ] 发热件周围留铜 / 留空间
+
+**仅当板上有高压时才勾（无高压请整组删掉）**
+
+> ⚠ 下列数值**必须按本板实际工作电压 + 污染等级 + CTI Group 从 IEC 60664-1 查表得出**，不要照抄。
+> 括号内是示例场景，不是你的板子的答案。
+
+- [ ] HV/LV 隔离槽宽度（示例：某 400V Group II 场景取 ≥1.5mm）
+- [ ] 爬电距离 creepage（示例：同上场景 ≥8mm）
+- [ ] 电气间隙 clearance（示例：同上场景 ≥2mm）
+- [ ] 高压走线宽度 + 尖角倒圆
+- [ ] 高压区丝印警示标识
 
 ---
 
@@ -109,7 +122,7 @@
 ## 下一步
 
 1. **Phase 1** — 用 `circuit-design` 跟用户讨论电路结构（拓扑 / 锚点件 / 周边）
-2. **Phase 2** — 用 `component-selecting-JP`（按 USER.md §0 locale 路由）出 shortlist
+2. **Phase 2** — 用 `component-selecting-<locale>` 出 shortlist（**locale 按 `USER.md` §0 所属地路由**：日本 → `-JP`，中国大陆 → `-CN`；其他 locale 见工作区 `CLAUDE.md` §Locale 路由，**不要静默 fallback**）
 3. **Phase 2.5** — 用 `component-preparing` 落资产（datasheet + library + evidence）+ 写 BOM sentinel + 采购 BOM CSV
 4. **Phase 3** — 用 `draw-schematic` 写 `.py` → 生成 .kicad_sch + ERC clean（生成 gate）
 5. **Phase 3.5** — 用 `check-schematic` 做 sch 单侧检查 + SPICE 仿真 + design review

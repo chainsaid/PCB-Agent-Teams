@@ -64,8 +64,19 @@ def _query_lcsc_id_via_jlcsearch(mpn: str) -> str | None:
 
 
 def query_lcsc_id(mpn: str) -> str | None:
-    """用 Jina Reader 代理读 LCSC 搜索页，提取真实 LCSC C 编号；失败时退到 jlcsearch API。"""
-    url = f"https://r.jina.ai/https://www.lcsc.com/search?q={mpn}"
+    """把 MPN 解析成 LCSC C 编号。
+
+    策略（依次尝试，任一步成功即返回）：
+      1. **C 号直通** —— 调用方握着 C 号时（选品 buyable lane 走 jlcsearch API 拿得到），
+         `C<数字>` 原样返回，不走网络。这是最稳最快的路径。
+      2. Jina Reader 代理读 LCSC 搜索页（依赖第三方 HTML 代理，某些网络会超时）。
+      3. jlcsearch API 回退（上游兜底，比 HTML 抓取稳定）。
+    """
+    probe = (mpn or "").strip()
+    if re.fullmatch(r"C\d+", probe, flags=re.IGNORECASE):
+        return probe.upper()
+
+    url = f"https://r.jina.ai/https://www.lcsc.com/search?q={probe}"
     try:
         req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urlopen(req, timeout=30) as r:

@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -72,7 +73,15 @@ def _resolve_evidence(pdf_path: Path, sentinel_mpn: str,
         return {"mpn": sentinel_mpn, "manufacturer": ""}
     stem = pdf_path.stem
     safe_stem = stem.replace('.', '_')
-    for candidate in (stem, safe_stem):
+    # lib_external/CONVENTIONS.md §7 命名约定：`<MPN>_<LCSC_ID>_datasheet.pdf` /
+    # `<MPN>_manufacturer_datasheet.pdf`。evidence 文件是 `<MPN>.json`，所以必须先把
+    # 约定后缀剥掉再查，否则 stem 匹配不到 evidence，会一路回落到把整个 stem
+    # （`ASDM4614S-R_C2758242_datasheet`）当 MPN 注进 .py —— 那不是真 MPN。
+    bare = re.sub(r'_(?:C\d+|manufacturer|[A-Za-z0-9]+)?_?datasheet$', '', stem)
+    candidates = [stem, safe_stem]
+    if bare and bare not in candidates:
+        candidates += [bare, bare.replace('.', '_')]
+    for candidate in candidates:
         ev_file = evidence_dir / f"{candidate}.json"
         if ev_file.exists():
             try:
@@ -85,8 +94,11 @@ def _resolve_evidence(pdf_path: Path, sentinel_mpn: str,
                     }
             except (json.JSONDecodeError, OSError):
                 pass
-    if stem and stem.lower() not in ("none", ""):
-        return {"mpn": stem, "manufacturer": ""}
+    # 没有 evidence 命中时，用剥掉约定后缀的 bare 名当 MPN，而不是整个 stem
+    # （`<MPN>_<LCSC_ID>_datasheet` 不是任何厂商的真实型号）。
+    for fallback in (bare, stem):
+        if fallback and fallback.lower() not in ("none", ""):
+            return {"mpn": fallback, "manufacturer": ""}
     return {"mpn": sentinel_mpn, "manufacturer": ""}
 
 

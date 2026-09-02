@@ -741,7 +741,7 @@ def _v2_write_lcsc_cache(mpn: str, result: dict) -> None:
         pass  # cache write failure is non-fatal
 
 
-def _network_probe_lcsc(mpn: str, timeout_sec: int = 30) -> dict:
+def _network_probe_lcsc(mpn: str, timeout_sec: int = 30, lcsc_id: Optional[str] = None) -> dict:
     """V2-only: LCSC dryrun with cache + retry network resilience.
 
     Differences from V1's library_probe.py:
@@ -750,8 +750,14 @@ def _network_probe_lcsc(mpn: str, timeout_sec: int = 30) -> dict:
       3. Mark `transient=True` when network fails — distinguishable from
          "LCSC confirmed no library" (complete=False).
       Transient errors do NOT poison the cache.
+
+    `lcsc_id` (canonical `C<digits>`) short-circuits the downloader's
+    MPN -> C-number step, which resolves through an HTML proxy and fails on
+    networks that only reach the JSON API. Callers that already hold the id
+    from the buyable lane should always pass it.
     """
-    cached = _v2_read_lcsc_cache(mpn)
+    lookup = (lcsc_id or "").strip() or mpn
+    cached = _v2_read_lcsc_cache(lookup)
     if cached is not None:
         cached["from_cache"] = True
         return cached
@@ -765,7 +771,7 @@ def _network_probe_lcsc(mpn: str, timeout_sec: int = 30) -> dict:
     for attempt in range(2):  # 1 try + 1 retry
         try:
             res = subprocess.run(
-                [sys.executable, str(downloader), "--verify-only", mpn],
+                [sys.executable, str(downloader), "--verify-only", lookup],
                 cwd=str(WORKSPACE_ROOT),
                 capture_output=True, text=True, timeout=timeout_sec,
             )
@@ -784,12 +790,26 @@ def _network_probe_lcsc(mpn: str, timeout_sec: int = 30) -> dict:
                 out["raw"] = r
                 out["complete"] = bool(r.get("ok"))
                 out["ok"] = True
-                _v2_write_lcsc_cache(mpn, dict(out))
+                # The downloader reports a network failure as a structured
+                # negative (e.g. error="no_lcsc_id" when its MPN lookup times
+                # out) rather than raising. Caching that would freeze a
+                # transient outage in for the full 7-day TTL and make every
+                # later run reproduce the same false negative, so only a
+                # genuine "LCSC has no library" answer is cacheable.
+                downloader_error = str(r.get("error") or "")
+                looks_transient = any(
+                    tok in downloader_error.lower()
+                    for tok in ("no_lcsc_id", "timed out", "timeout", "urlopen", "connection")
+                )
+                if out["complete"] or not looks_transient:
+                    _v2_write_lcsc_cache(lookup, dict(out))
+                else:
+                    out["transient"] = True
                 return out
             # Empty array = LCSC said "no match" (real negative answer)
             out["ok"] = True
             out["complete"] = False
-            _v2_write_lcsc_cache(mpn, dict(out))
+            _v2_write_lcsc_cache(lookup, dict(out))
             return out
         except Exception as e:
             out["error"] = f"parse_failed: {e}"
@@ -820,6 +840,7 @@ def probe(
     datasheet_package: Optional[str] = None,
     locale_block: Optional[dict] = None,
     dk_part_id: Optional[str] = None,
+    lcsc_id: Optional[str] = None,
     include_network_probes: bool = False,
 ) -> dict:
     """Probe library readiness for a single MPN. Returns a dict with:
@@ -990,7 +1011,7 @@ def probe(
 
     # Tier 7: LCSC dry-run (only called now if local tiers exhausted)
     if status == "unavailable" and include_network_probes:
-        network["lcsc"] = _network_probe_lcsc(mpn)
+        network["lcsc"] = _network_probe_lcsc(mpn, lcsc_id=lcsc_id)
         if (network["lcsc"] or {}).get("complete"):
             status = "lcsc_vendorable"
             notes.append("lcsc_vendorable: commit_part will run LCSC + easyeda2kicad to vendor.")

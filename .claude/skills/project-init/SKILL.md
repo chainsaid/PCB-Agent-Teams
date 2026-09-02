@@ -129,7 +129,7 @@ circuit-design 结果填进 Projects/<name>/CLAUDE.md
 
 ```
 Phase 1   → circuit-design             讨论电路结构
-Phase 2   → component-selecting-JP     出 shortlist
+Phase 2   → component-selecting-<locale>  出 shortlist（locale 按 USER.md §0 路由）
 Phase 2.5 → component-preparing        落资产 + 写 BOM sentinel + 采购 CSV
 Phase 3   → draw-schematic             生成 .kicad_sch
 Phase 3.5 → check-schematic            sch 检查 + SPICE

@@ -2101,6 +2101,21 @@ def _dk_part_from_vendor_results(vendor_results: list[dict[str, Any]] | None) ->
     return None
 
 
+def _lcsc_id_from_vendor_results(vendor_results: list[dict[str, Any]] | None) -> str | None:
+    """Pull the LCSC part id the buyable lane already resolved via jlcsearch.
+
+    The library probe otherwise re-derives MPN -> C-number by scraping an HTML
+    proxy, which fails in networks where only the JSON API is reachable. The id
+    is already in hand here, so hand it over instead of resolving it twice.
+    Returned in canonical `C<digits>` form (jlcsearch reports it bare).
+    """
+    for v in vendor_results or []:
+        if v.get("vendor_id", "") == "lcsc" and v.get("lcsc_id"):
+            raw = str(v["lcsc_id"]).strip()
+            return raw if raw.upper().startswith("C") else f"C{raw}"
+    return None
+
+
 def probe_library(
     candidate: dict[str, Any],
     locale_block: dict[str, Any],
@@ -2125,6 +2140,7 @@ def probe_library(
     mpn = str(candidate.get("mpn", "")).strip()
     precomputed = candidate.get("library_status")
     dk_id = candidate.get("dk_part_id") or _dk_part_from_vendor_results(vendor_results)
+    lcsc_id = candidate.get("lcsc_id") or _lcsc_id_from_vendor_results(vendor_results)
     if precomputed:
         result = {
             "status": precomputed,
@@ -2155,6 +2171,7 @@ def probe_library(
                     datasheet_package=candidate.get("datasheet_package"),
                     locale_block=locale_block,
                     dk_part_id=dk_id,
+                    lcsc_id=lcsc_id,
                     include_network_probes=include_network_probes,
                 )
             except Exception as exc:
@@ -2199,7 +2216,11 @@ def classify_package(pkg_text: str) -> str:
         return "reflow_only"
     if "0402" in low or "qfp-0.5" in low or "0.4mm" in low:
         return "hand_solder_hard"
-    if any(t in low for t in ("through", "tht", "dip", "sip", "to-220", "terminal", "connector", "0805", "1206", "1210")):
+    if any(t in low for t in ("through", "tht", "dip", "sip", "to-220", "terminal", "connector", "0805", "1206", "1210",
+                              # 轴向/贴片二极管家族：两脚大封装，比 0805 更易焊（TVS / 整流管常态封装）
+                              "sma", "smb", "smc", "sod-", "do-214", "do-201", "do-204", "do-35", "do-41",
+                              # 中文封装描述（jlcparts 导出常见「插件, DxL」「直插」）
+                              "插件", "直插", "轴插", "径向", "玻璃管")):
         return "hand_solder_easy"
     if any(t in low for t in ("soic", "sop", "tssop", "ssop", "sot-223", "sot223", "sot-23", "sot23", "0603")):
         return "hand_solder_ok"
