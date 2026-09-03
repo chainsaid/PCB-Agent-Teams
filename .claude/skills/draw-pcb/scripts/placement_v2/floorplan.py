@@ -107,11 +107,23 @@ DEFAULT_BOARD_MARGIN = 2.5
 DEFAULT_SLOT_WIDTH = 4.0
 
 
-def _region_min_size(area_mm2: float, aspect: float, density: float) -> Tuple[float, float]:
-    """Compute region rect width × height that fits area at target aspect."""
-    if area_mm2 <= 0:
+def _region_min_size(area_mm2: float, aspect: float, density: float,
+                     grid_area_mm2: float = 0.0) -> Tuple[float, float]:
+    """Compute region rect width × height that fits area at target aspect.
+
+    `area_mm2` is the summed courtyard area of the region's footprints. But
+    layout.py places on a UNIFORM grid whose cell is sized from the region's
+    LARGEST footprint, one component per cell. When a region mixes a 12.5mm
+    inductor with 0603 passives the area-only estimate badly undershoots and
+    the grid gets compressed below footprint size → courtyards_overlap in DRC.
+
+    `grid_area_mm2` carries n_refs × cell_w × cell_h computed with layout.py's
+    own cell formula; the region is sized to whichever estimate is larger so
+    the grid always fits inside the region rect.
+    """
+    if area_mm2 <= 0 and grid_area_mm2 <= 0:
         return 0.0, 0.0
-    needed = area_mm2 / max(0.05, density)
+    needed = max(area_mm2 / max(0.05, density), grid_area_mm2)
     h = math.sqrt(needed / aspect)
     w = h * aspect
     return w, h
@@ -127,12 +139,18 @@ def plan_floorplan(
     region_order: Optional[List[str]] = None,
     min_w: Optional[float] = None,
     min_h: Optional[float] = None,
+    region_grid_areas: Optional[Mapping[str, float]] = None,
 ) -> Floorplan:
     """Compute board outline + region rects + slots.
 
     Args:
         region_areas: {region_label → total courtyard area in mm²} from
                       Phase A partition + footprint dimensions.
+        region_grid_areas: {region_label → n_refs × cell_w × cell_h} using
+                      layout.py's uniform-grid cell formula. Sizing a region
+                      from courtyard area alone undershoots badly whenever one
+                      large footprint drives the cell size, so each region is
+                      sized to whichever of the two estimates is larger.
         isolation_gaps: list of {between: [region_a, region_b], width_mm,
                                  reason}. Each entry creates a slot drawn
                                  on Edge.Cuts at the gap between those
@@ -174,7 +192,8 @@ def plan_floorplan(
     # Size each region rect.
     region_sizes: Dict[str, Tuple[float, float]] = {}
     for r in order:
-        w, h = _region_min_size(region_areas[r], aspect_ratio, pack_density)
+        w, h = _region_min_size(region_areas[r], aspect_ratio, pack_density,
+                                (region_grid_areas or {}).get(r, 0.0))
         # Floor at 8mm to avoid pathologically thin strips.
         region_sizes[r] = (max(w, 8.0), max(h, 8.0))
 

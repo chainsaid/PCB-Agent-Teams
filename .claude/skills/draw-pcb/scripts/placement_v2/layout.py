@@ -136,6 +136,12 @@ def run_layout(problem: PlacementProblem,
             cell_idx += 1
 
     # ----- tight snap: each declared pair → cap immediately east of IC -----
+    # Two+ decoupling caps on the same IC (e.g. dual VIN caps) used to collide:
+    # cap_x only depended on the IC's position and the cap's own width, so
+    # every cap for that IC landed at the SAME (cap_x, cap_y) → courtyard
+    # overlap in DRC. Fix: track how many caps have already been snapped to
+    # each IC and stack additional ones further east, one cap-width apart.
+    _ic_snap_count: Dict[str, int] = {}
     for pair in problem.decoupling_pairs:
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
             continue
@@ -149,7 +155,10 @@ def run_layout(problem: PlacementProblem,
         ic_x, ic_y, _ = placed[ic]
         ic_w = problem.fp_sizes[ic][0]
         cap_w = problem.fp_sizes[cap][0]
-        cap_x = ic_x + ic_w / 2 + cap_w / 2 + ADJACENCY_GAP_MM
+        slot = _ic_snap_count.get(ic, 0)
+        _ic_snap_count[ic] = slot + 1
+        cap_x = (ic_x + ic_w / 2 + cap_w / 2 + ADJACENCY_GAP_MM
+                 + slot * (cap_w + ADJACENCY_GAP_MM))
         cap_y = ic_y
         # Clamp inside region rect so we don't push the cap off-board.
         cap_x = max(rx + cap_w / 2, min(cap_x, rx + rw - cap_w / 2))

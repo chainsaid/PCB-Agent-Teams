@@ -223,6 +223,10 @@ def check_one_component(comp: Dict, tools: Dict, ds_dir: Path,
     # been injected — inject_mpn_props.py writes it as a `MPN=` Component()
     # kwarg, surfaced here as `mpn_prop` by extract_components_from_py.
     procurement_mpn = comp.get("mpn_prop") or mpn
+    # Evidence / datasheet 文件名以真 MPN 命名（CONVENTIONS.md §7），永远用
+    # 这个键查，不用 value（100nF/34k/...）。定义在函数顶层，两处查找
+    # （可买性 + datasheet）共用，不受 if/elif/else 分支限制。
+    lookup_mpn = procurement_mpn or mpn
 
     result = {
         "ref": ref,
@@ -357,8 +361,8 @@ def check_one_component(comp: Dict, tools: Dict, ds_dir: Path,
     elif not mpn or len(mpn) < 4:
         result["stock_ok"] = None
     else:
-        ev_path = _evidence_path_for(ds_dir, mpn)
-        ev = _read_component_selecting_evidence(ds_dir, mpn)
+        ev_path = _evidence_path_for(ds_dir, lookup_mpn)
+        ev = _read_component_selecting_evidence(ds_dir, lookup_mpn)
         result["component_selecting_evidence"] = str(ev_path)
         if not ev:
             result["stock_ok"] = False
@@ -366,7 +370,7 @@ def check_one_component(comp: Dict, tools: Dict, ds_dir: Path,
                 "无 component-selecting evidence，不能复检 locale vendor gate"
             )
             result["actions"].append(
-                f"先跑 component-preparing --mpn '{mpn}' "
+                f"先跑 component-preparing --mpn '{lookup_mpn}' "
                 f"--ref {ref} --project-path <proj> --verified-url ..."
             )
         else:
@@ -395,7 +399,9 @@ def check_one_component(comp: Dict, tools: Dict, ds_dir: Path,
         result["datasheet_ok"] = True
         result["datasheet"] = None
     else:
-        safe_mpn = (mpn or "").replace("/", "_").replace(" ", "_")
+        # 同上：datasheet 文件名以真 MPN 命名（CONVENTIONS.md §7
+        # `<MPN>_<LCSC_ID>_datasheet.pdf`），用 value 通配匹配不到。
+        safe_mpn = (procurement_mpn or mpn or "").replace("/", "_").replace(" ", "_")
         matching_pdfs = list(ds_dir.glob(f"*{safe_mpn}*.pdf")) if safe_mpn else []
         found_pdf = [p for p in matching_pdfs if _is_real_datasheet_pdf(p)]
         fake_pdf = [p for p in matching_pdfs if not _is_real_datasheet_pdf(p)]
@@ -411,10 +417,10 @@ def check_one_component(comp: Dict, tools: Dict, ds_dir: Path,
                 "删除占位 PDF，重跑 component-preparing 抓真实 datasheet；"
                 "通用件没有真 MPN 时应留 datasheet=None"
             )
-        elif mpn and len(mpn) >= 4 and any(c.isdigit() for c in mpn):
+        elif lookup_mpn and len(lookup_mpn) >= 4 and any(c.isdigit() for c in lookup_mpn):
             # 不再直接 LCSC 下载 datasheet。component-selecting commit_part 已经
             # 在选品阶段把 datasheet 拉到 ds_dir 并写到 evidence。
-            ev = _read_component_selecting_evidence(ds_dir, mpn)
+            ev = _read_component_selecting_evidence(ds_dir, lookup_mpn)
             ds_from_ev = (ev or {}).get("datasheet", {}).get("path") if ev else None
             if ds_from_ev and _is_real_datasheet_pdf(ds_dir.parent / ds_from_ev):
                 result["datasheet_ok"] = True

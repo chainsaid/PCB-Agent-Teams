@@ -316,6 +316,7 @@ def run_erc(sch_path: Path, kicad_cli: str) -> Dict:
         # 兼容老字段（继续暴露，不破坏外部消费者）
         "pin_not_connected": errors_by_type.get("pin_not_connected", 0),
         "power_pin_not_driven": errors_by_type.get("power_pin_not_driven", 0),
+        "pin_not_driven": errors_by_type.get("pin_not_driven", 0),
         "raw_data": data,
     }
 
@@ -672,9 +673,13 @@ def main():
         erc_data = run_erc(sch, kicad_cli)
         _print_erc_summary(erc_data, prefix="  ")
 
-        # 自动修 power_pin_not_driven：注入 PWR_FLAG 后重跑 ERC（最多 1 轮）
-        if erc_data.get("power_pin_not_driven", 0) > 0:
-            print("  → 检测到 power_pin_not_driven，自动注入 PWR_FLAG ...")
+        # 自动修 power_pin_not_driven / pin_not_driven：注入 PWR_FLAG 后重跑 ERC（最多 1 轮）
+        # pin_not_driven 常发生在 KiCad Device 库的 R/C 符号上（其 pin 类型为 input），
+        # 或 easyeda2kicad 生成的被动件符号（pin 类型同样被标成 input）。
+        # 与 power_pin_not_driven 修法完全相同：给该 net 加 PWR_FLAG 即可。
+        n_pin_nd = erc_data.get("pin_not_driven", 0) + erc_data.get("power_pin_not_driven", 0)
+        if n_pin_nd > 0:
+            print(f"  → 检测到 {n_pin_nd} 个未驱动 pin（power_pin={erc_data.get('power_pin_not_driven',0)} pin={erc_data.get('pin_not_driven',0)}），自动注入 PWR_FLAG ...")
             try:
                 from add_pwr_flags import add_pwr_flags_for_violations
                 n_flag, pwr_flag_added = add_pwr_flags_for_violations(

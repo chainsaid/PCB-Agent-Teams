@@ -161,15 +161,22 @@ def _rotate(x: float, y: float, rot_deg: float) -> tuple[float, float]:
 
 
 def find_nets_to_flag(erc_data: dict, component_nets: dict) -> Dict[str, tuple[str, str]]:
-    """从 ERC json 提取 power_pin_not_driven 涉及的 net。
+    """从 ERC json 提取需要喂电的 net。
+
+    处理两类 ERC 规则，修法完全相同（都是"这个 net 没有 Output/power_out 驱动"）：
+      - `power_pin_not_driven`：元件的 power_in pin 没被驱动
+      - `pin_not_driven`：普通 Input pin 没被驱动。KiCad 标准 Device 库里
+        R/C/L 的两个 pin 都是 passive，但 vendored 库（easyeda2kicad 转换出来的）
+        常把 pin 类型标成 `input`，于是纯被动网络也会报这条。同样靠 PWR_FLAG 解决。
 
     返回 {net_name: (ref, pin)} —— 每个 net 一个代表 pin（ERC 报告的那个）。
     后面用这个 (ref, pin) 拿精确坐标，把 PWR_FLAG 放上去。
     """
+    _FLAGGABLE = {"power_pin_not_driven", "pin_not_driven"}
     nets: Dict[str, tuple[str, str]] = {}
     for sheet in erc_data.get("sheets", []):
         for v in sheet.get("violations", []):
-            if v.get("type") != "power_pin_not_driven":
+            if v.get("type") not in _FLAGGABLE:
                 continue
             for item in v.get("items", []):
                 m = _DESC_PAT.search(item.get("description", ""))

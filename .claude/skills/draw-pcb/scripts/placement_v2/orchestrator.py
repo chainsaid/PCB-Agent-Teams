@@ -441,8 +441,23 @@ def run_placement_v2(pcb_path: Path,
 
     # ----- Phase B: floorplan -----
     region_areas = courtyard_area_by_region(assignments, fp_sizes)
+    # Region sizing must also clear the uniform grid layout.py will lay down:
+    # its cell is max(largest_footprint × 1.2, 4.0) and every ref takes one
+    # cell, so a single big part (e.g. a 12.5mm inductor) inflates the real
+    # requirement far past the summed courtyard area. Mirror that formula here.
+    region_grid_areas: Dict[str, float] = {}
+    for _region in set(assignments.values()):
+        _refs = [r for r, reg in assignments.items() if reg == _region]
+        if not _refs:
+            continue
+        _max_w = max(fp_sizes[r][0] for r in _refs if r in fp_sizes)
+        _max_h = max(fp_sizes[r][1] for r in _refs if r in fp_sizes)
+        _cell_w = max(_max_w * 1.2, 4.0)
+        _cell_h = max(_max_h * 1.2, 4.0)
+        region_grid_areas[_region] = len(_refs) * _cell_w * _cell_h
     fp = plan_floorplan(
         region_areas=region_areas,
+        region_grid_areas=region_grid_areas,
         isolation_gaps=cfg.get("isolation_slots") or [],
         orientation=cfg.get("orientation", "horizontal"),
         aspect_ratio=float(cfg.get("aspect_ratio", 1.4)),
